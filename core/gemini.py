@@ -76,7 +76,7 @@ def _get_genai_client() -> genai.Client | None:
 
 def _local_count_tokens(model: str, text: str) -> int:
     """Estimate token count using a simple character-based heuristic."""
-    return len(text) // 4
+    return len(text) // 3
 
 
 # ---------------------------------------------------------------------------

@@ -236,19 +236,19 @@ class TestGetGenaiClient:
 class TestFetchArticleTextAsync:
     @pytest.mark.asyncio
     async def test_returns_empty_tuple_on_all_failures(self, monkeypatch):
-        """When both curl_cffi and CloudScraper fail, should return ('', url)."""
+        """When both stealth-requests and curl_cffi fail, should return ('', url)."""
+
+        def mock_stealth_fail(url, proxy=None):
+            return ("", url)
+
         mock_session = AsyncMock()
         mock_resp = AsyncMock()
         mock_resp.status_code = 403
         mock_resp.url = "https://example.com"
         mock_resp.text = "Blocked"
         mock_session.get = AsyncMock(return_value=mock_resp)
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth_fail)
         monkeypatch.setattr("core.scraper._get_async_session", lambda: mock_session)
-
-        async def mock_legacy_fail(fn, *args):
-            raise ConnectionError("Network error")
-
-        monkeypatch.setattr(asyncio, "to_thread", mock_legacy_fail)
 
         semaphore = asyncio.Semaphore(5)
         result = await fetch_article_text_async("https://example.com", semaphore)
@@ -256,17 +256,12 @@ class TestFetchArticleTextAsync:
 
     @pytest.mark.asyncio
     async def test_returns_result_on_success(self, monkeypatch):
-        """When curl_cffi returns valid content, should return it directly."""
-        large_html = (
-            "<html><body>" + "<p>Article content here.</p>" * 200 + "</body></html>"
-        )
-        mock_session = AsyncMock()
-        mock_resp = AsyncMock()
-        mock_resp.status_code = 200
-        mock_resp.url = "https://example.com/article"
-        mock_resp.text = large_html
-        mock_session.get = AsyncMock(return_value=mock_resp)
-        monkeypatch.setattr("core.scraper._get_async_session", lambda: mock_session)
+        """When stealth-requests returns valid content, should return it directly."""
+
+        def mock_stealth_success(url, proxy=None):
+            return ("Article content here. " * 50, url)
+
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth_success)
 
         semaphore = asyncio.Semaphore(5)
         result = await fetch_article_text_async(
@@ -278,16 +273,11 @@ class TestFetchArticleTextAsync:
     @pytest.mark.asyncio
     async def test_respects_semaphore_concurrency(self, monkeypatch):
         """Semaphore should limit concurrent operations."""
-        large_html = (
-            "<html><body>" + "<p>Content paragraph.</p>" * 200 + "</body></html>"
-        )
-        mock_session = AsyncMock()
-        mock_resp = AsyncMock()
-        mock_resp.status_code = 200
-        mock_resp.url = "https://example.com/article"
-        mock_resp.text = large_html
-        mock_session.get = AsyncMock(return_value=mock_resp)
-        monkeypatch.setattr("core.scraper._get_async_session", lambda: mock_session)
+
+        def mock_stealth_success(url, proxy=None):
+            return ("Content paragraph. " * 50, url)
+
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth_success)
 
         entry_count = 0
         max_concurrent = 0

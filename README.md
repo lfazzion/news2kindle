@@ -6,7 +6,7 @@ Busca automaticamente newsletters do email, extrai os artigos vinculados, traduz
 
 1. Conecta no email via IMAP e baixa newsletters não lidas do email.
 2. Extrai o texto de cada newsletter e coleta os links internos para artigos completos.
-3. Faz scraping dos artigos com anti-bot bypass (curl_cffi + CloudScraper).
+3. Faz scraping dos artigos com anti-bot bypass (stealth-requests + curl_cffi).
 4. Usa Google Gemini em 3 fases: categoriza, faz merge de artigos relacionados e traduz para português.
 5. Gera um HTML otimizado para leitura no Kindle (fonte Georgia, sumário interativo com âncoras, separação por relevância).
 6. Envia por email para o Kindle e limpa as newsletters processadas.
@@ -22,8 +22,8 @@ Busca automaticamente newsletters do email, extrai os artigos vinculados, traduz
 ┌─────────────────────────────────────────────────────────────────┐
 │  Fase 1 — Extração de Conteúdo                                  │
 │  IMAP → HTML → Markdown + coleta de links → Scraping async     │
-│  curl_cffi AsyncSession (primary) → CloudScraper (fallback)    │
-│  Batch de 3 requests, delay 3s entre batches, retry 30s.       │
+│  stealth-requests (primary) → curl_cffi (fallback)             │
+│  Burst de 3 requests, jittered pause (5-12s), retry 30s.       │
 └────────────────────────┬────────────────────────────────────────┘
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -64,13 +64,13 @@ Busca automaticamente newsletters do email, extrai os artigos vinculados, traduz
 ### Scraper — cascade de fallback
 
 ```
-curl_cffi AsyncSession          CloudScraper
-(Chrome TLS impersonation)  →   (legacy, JS challenge solver)
-     primary                        fallback
+stealth-requests          curl_cffi AsyncSession
+(UA rotation + TLS)   →   (Chrome 145/146 TLS fingerprint)
+     primary                   fallback
 ```
 
-- **curl_cffi** (`>=0.14.0`): Finge fingerprint TLS do Chrome via `impersonate="chrome"`. Sessão async nativa (sem threads). Suporta proxy residencial.
-- **CloudScraper** (`>=1.2.71`): Resolve desafios JavaScript do Cloudflare. Usado apenas quando curl_cffi retorna 403/429/503 ou resposta muito pequena.
+- **stealth-requests** (`>=2.0.0`): Wrapper sobre curl_cffi com rotação nativa de User-Agent (58 variantes Chrome 136). TLS fingerprint Chrome. Suporta proxy via `proxies={}`. Scraper primário para todas as URLs.
+- **curl_cffi** (`>=0.15.0`): Fingerprints HTTP/3 Chrome 145/146. Sessão async nativa (sem threads). Suporta proxy residencial. Usado como fallback quando stealth-requests retorna 403/429/503 ou resposta muito pequena.
 - Se ambos falham, o artigo é descartado e o pipeline continua com os demais.
 
 ## Estrutura do projeto
@@ -136,7 +136,7 @@ No repositório: **Settings** → **Secrets and variables** → **Actions** → 
 | `SMTP_PORT` | Porta SMTP | `587` |
 | `KINDLE_EMAIL` | Email do Kindle | `joao_123@kindle.com` |
 | `GOOGLE_API_KEY` | Chave do Google AI Studio | `AIzaSyD...` |
-| `SCRAPER_PROXY` | *(Opcional)* Proxy residencial | `http://user:pass@host:port` |
+| `SCRAPER_PROXY_LIST` | *(Opcional)* Lista de proxies (CSV) | `http://user:pass@host1:port1,http://user:pass@host2:port2` |
 
 #### Servidores por provedor de email
 
@@ -151,11 +151,12 @@ No repositório: **Settings** → **Secrets and variables** → **Actions** → 
 
 ### 3. Proxy residencial (opcional)
 
-GitHub Actions roda em IPs de datacenter Azure, que a Cloudflare trata com mais rigor. Se você estiver vendo muitos 403 no scraping, configure um proxy residencial:
+GitHub Actions roda em IPs de datacenter Azure, que a Cloudflare trata com mais rigor. Se você estiver vendo muitos 403 no scraping, configure proxies residenciais:
 
-1. Adicione o secret `SCRAPER_PROXY` no GitHub.
-2. Formato: `http://user:pass@proxy-host:port` ou `socks5://user:pass@proxy-host:port`
-3. Para ~50 requests/dia, o consumo é <1GB/mês.
+1. Adicione o secret `SCRAPER_PROXY_LIST` no GitHub.
+2. Formato CSV: `http://user:pass@host1:port1,http://user:pass@host2:port2`
+3. Os proxies são rotacionados automaticamente entre as requisições.
+4. Para ~50 requests/dia, o consumo é <1GB/mês.
 
 O script funciona normalmente sem proxy (conexão direta).
 
@@ -202,8 +203,8 @@ python -m pytest tests/ -v
 
 | Biblioteca | Uso |
 |---|---|
-| `curl_cffi` (>=0.14.0) | HTTP com impersonação TLS Chrome (scraper primário) |
-| `cloudscraper` (>=1.2.71) | Resolvedor de desafios Cloudflare (fallback legado) |
+| `stealth-requests` (>=2.0.0) | Scraper primário — UA rotation + TLS Chrome (wrapper curl_cffi) |
+| `curl_cffi` (>=0.15.0) | HTTP com impersonação TLS Chrome (scraper fallback) |
 | `trafilatura` (>=2.0.0) | Extração de conteúdo de artigos web |
 | `beautifulsoup4` + `lxml` | Parsing HTML de newsletters |
 | `markdownify` | Conversão HTML → Markdown |
@@ -212,7 +213,6 @@ python -m pytest tests/ -v
 | `aiosmtplib` | Envio async de email via SMTP |
 | `aiolimiter` | Rate limiter async (RPM/TPM) |
 | `tenacity` | Retry com backoff exponencial |
-| `stealth-requests` | Wrapper curl_cffi com UA rotation (disponível) |
 
 ## Variáveis de ambiente
 
@@ -225,7 +225,7 @@ python -m pytest tests/ -v
 | `SMTP_PORT` | Não | `587` | Porta SMTP |
 | `KINDLE_EMAIL` | Sim | — | Email do Kindle |
 | `GOOGLE_API_KEY` | Sim | — | Chave API Google Gemini |
-| `SCRAPER_PROXY` | Não | — | Proxy residencial |
+| `SCRAPER_PROXY_LIST` | Não | — | Lista de proxies residenciais (CSV) |
 
 ## Testes
 

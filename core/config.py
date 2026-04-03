@@ -1,5 +1,6 @@
 """Shared constants, dataclasses, and helper functions for the newsletter pipeline."""
 
+import itertools
 import logging
 import os
 import re
@@ -22,9 +23,12 @@ SMTP_SERVER: str = os.environ.get("SMTP_SERVER") or "smtp.gmail.com"
 SMTP_PORT: int = int(os.environ.get("SMTP_PORT") or "587")
 KINDLE_EMAIL: str | None = os.environ.get("KINDLE_EMAIL")
 GOOGLE_API_KEY: str | None = os.environ.get("GOOGLE_API_KEY")
-SCRAPER_PROXY: str | None = os.environ.get("SCRAPER_PROXY") or os.environ.get(
-    "HTTPS_PROXY"
-)
+
+_RAW_PROXY_LIST: str | None = os.environ.get("SCRAPER_PROXY_LIST")
+
+SCRAPER_PROXY_LIST: list[str] = [
+    p.strip() for p in (_RAW_PROXY_LIST or "").split(",") if p.strip()
+]
 
 NYT_SENDERS: list[str] = [
     "nytdirect@nytimes.com",
@@ -380,3 +384,24 @@ def _validate_config() -> None:
             f"Missing required environment variable(s): {', '.join(missing)}. "
             "Please check your .env file."
         )
+
+
+_proxy_cycle: itertools.cycle[str] | None = None
+
+
+def _get_proxy_cycle() -> itertools.cycle[str] | None:
+    """Returns a cycle iterator over SCRAPER_PROXY_LIST, or None if empty."""
+    global _proxy_cycle
+    if not SCRAPER_PROXY_LIST:
+        return None
+    if _proxy_cycle is None:
+        _proxy_cycle = itertools.cycle(SCRAPER_PROXY_LIST)
+    return _proxy_cycle
+
+
+def _next_proxy() -> str | None:
+    """Returns the next proxy from the rotation, or None if no proxies configured."""
+    cycle = _get_proxy_cycle()
+    if cycle is None:
+        return None
+    return next(cycle)

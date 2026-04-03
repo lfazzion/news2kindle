@@ -34,8 +34,8 @@ jobs:
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           KINDLE_EMAIL: ${{ secrets.KINDLE_EMAIL }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          # Optional: residential proxy to bypass Cloudflare datacenter IP blocking.
-          # Format: "http://user:pass@proxy-host:port" or "socks5://user:pass@proxy-host:port"
+          # Optional: residential proxy list to bypass Cloudflare datacenter IP blocking.
+          # Format: "http://user:pass@host1:port1,http://user:pass@host2:port2"
           # GitHub Actions runs on Azure datacenter IPs which Cloudflare scrutinises more.
-          SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
+          SCRAPER_PROXY_LIST: ${{ secrets.SCRAPER_PROXY_LIST }}
         run: python main.py

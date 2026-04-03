@@ -1,12 +1,13 @@
-"""Tests for the V5 scraping architecture.
+"""Tests for the V6 scraping architecture.
 
-Covers: curl_cffi AsyncSession primary + CloudScraper fallback,
+Covers: stealth-requests primary + curl_cffi fallback,
 status code checks, response size validation, og:description fallback,
 captcha detection, async timeout, content density heuristic,
-expanded markdownify tags, and preloaded data regex.
+expanded markdownify tags, preloaded data regex, and proxy rotation.
 """
 
 import asyncio
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,17 +16,16 @@ from core.config import (
     _PRELOADED_JSON_RE,
     HTTP_BLOCK_STATUS_CODES,
     MIN_HTML_RESPONSE_LENGTH,
-    SCRAPER_PROXY,
     SCRAPER_URL_TIMEOUT,
     _is_blocked_content,
 )
 from core.scraper import (
     _extract_metadata_fallback,
     _fetch_article_text_async_impl,
-    _fetch_legacy_sync,
+    _fetch_stealth_sync,
     _get_async_session,
-    _get_legacy_scraper,
     _parse_html_to_markdown,
+    _safe_legacy_fallback,
     fetch_article_text_async,
 )
 
@@ -54,104 +54,218 @@ def _patch_async_session(monkeypatch, response):
 
 
 # ===========================================================================
-# HTTP status code handling — curl_cffi primary, CloudScraper fallback
+# Cascade: stealth-requests primary → curl_cffi fallback
 # ===========================================================================
 
 
-class TestHttpStatusCodeHandling:
-    """Verifies that HTTP 403/429/503 on curl_cffi
-    trigger _safe_legacy_fallback (full cascade)."""
+class TestCascadeOrder:
+    """Verifies that stealth-requests is tried first, then curl_cffi fallback."""
 
     @pytest.mark.asyncio
-    async def test_403_triggers_full_fallback_cascade(self, monkeypatch):
-        """curl_cffi 403 should invoke _safe_legacy_fallback (full cascade)."""
-        _patch_async_session(monkeypatch, _make_mock_response(status_code=403))
+    async def test_stealth_succeeds_no_fallback(self, monkeypatch):
+        """When stealth-requests returns valid content, curl_cffi is NOT called."""
+        stealth_called = False
+        curl_fallback_called = False
 
-        fallback_called = False
+        def mock_stealth(url, proxy=None):
+            nonlocal stealth_called
+            stealth_called = True
+            return ("stealth content", url)
 
-        async def mock_safe_fallback(url):
-            nonlocal fallback_called
-            fallback_called = True
-            return ("fallback content", url)
+        async def mock_curl_fallback(url):
+            nonlocal curl_fallback_called
+            curl_fallback_called = True
+            return ("curl content", url)
 
-        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_safe_fallback)
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth)
+        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_curl_fallback)
 
         md, url = await _fetch_article_text_async_impl("https://example.com/article")
-        assert fallback_called, "_safe_legacy_fallback should be triggered on HTTP 403"
-        assert md == "fallback content"
+        assert stealth_called
+        assert not curl_fallback_called
+        assert md == "stealth content"
 
     @pytest.mark.asyncio
-    async def test_429_triggers_full_fallback_cascade(self, monkeypatch):
+    async def test_stealth_fails_falls_back_to_curl(self, monkeypatch):
+        """When stealth-requests returns empty, curl_cffi fallback is invoked."""
+        stealth_called = False
+        curl_fallback_called = False
+
+        def mock_stealth(url, proxy=None):
+            nonlocal stealth_called
+            stealth_called = True
+            return ("", url)
+
+        async def mock_curl_fallback(url):
+            nonlocal curl_fallback_called
+            curl_fallback_called = True
+            return ("curl fallback content", url)
+
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth)
+        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_curl_fallback)
+
+        md, url = await _fetch_article_text_async_impl("https://example.com/article")
+        assert stealth_called
+        assert curl_fallback_called
+        assert md == "curl fallback content"
+
+    @pytest.mark.asyncio
+    async def test_stealth_exception_falls_back_to_curl(self, monkeypatch):
+        """When stealth-requests raises, curl_cffi fallback is invoked."""
+
+        def mock_stealth(url, proxy=None):
+            raise ConnectionError("network down")
+
+        curl_fallback_called = False
+
+        async def mock_curl_fallback(url):
+            nonlocal curl_fallback_called
+            curl_fallback_called = True
+            return ("curl recovered", url)
+
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth)
+        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_curl_fallback)
+
+        md, url = await _fetch_article_text_async_impl("https://example.com/article")
+        assert curl_fallback_called
+        assert md == "curl recovered"
+
+    @pytest.mark.asyncio
+    async def test_both_fail_returns_empty(self, monkeypatch):
+        """When both scrapers fail, returns ('', url)."""
+
+        def mock_stealth(url, proxy=None):
+            return ("", url)
+
+        async def mock_curl_fallback(url):
+            return ("", url)
+
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth)
+        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_curl_fallback)
+
+        md, url = await _fetch_article_text_async_impl("https://example.com/article")
+        assert md == ""
+
+    @pytest.mark.asyncio
+    async def test_proxy_passed_to_stealth(self, monkeypatch):
+        """_next_proxy() result should be passed to _fetch_stealth_sync."""
+        received_proxy = None
+
+        def mock_stealth(url, proxy=None):
+            nonlocal received_proxy
+            received_proxy = proxy
+            return ("content", url)
+
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth)
+        monkeypatch.setattr("core.scraper._next_proxy", lambda: "http://proxy1:8080")
+
+        await _fetch_article_text_async_impl("https://example.com/article")
+        assert received_proxy == "http://proxy1:8080"
+
+
+# ===========================================================================
+# curl_cffi fallback behavior
+# ===========================================================================
+
+
+class TestCurlCffiFallback:
+    """Verifies curl_cffi fallback handles status codes and response size."""
+
+    @pytest.mark.asyncio
+    async def test_curl_403_returns_empty(self, monkeypatch):
+        _patch_async_session(monkeypatch, _make_mock_response(status_code=403))
+        md, url = await _safe_legacy_fallback("https://example.com/article")
+        assert md == ""
+
+    @pytest.mark.asyncio
+    async def test_curl_429_returns_empty(self, monkeypatch):
         _patch_async_session(monkeypatch, _make_mock_response(status_code=429))
-
-        fallback_called = False
-
-        async def mock_safe_fallback(url):
-            nonlocal fallback_called
-            fallback_called = True
-            return ("fallback content", url)
-
-        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_safe_fallback)
-
-        await _fetch_article_text_async_impl("https://example.com/article")
-        assert fallback_called, "_safe_legacy_fallback should be triggered on HTTP 429"
+        md, url = await _safe_legacy_fallback("https://example.com/article")
+        assert md == ""
 
     @pytest.mark.asyncio
-    async def test_503_triggers_full_fallback_cascade(self, monkeypatch):
+    async def test_curl_503_returns_empty(self, monkeypatch):
         _patch_async_session(monkeypatch, _make_mock_response(status_code=503))
-
-        fallback_called = False
-
-        async def mock_safe_fallback(url):
-            nonlocal fallback_called
-            fallback_called = True
-            return ("fallback content", url)
-
-        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_safe_fallback)
-
-        await _fetch_article_text_async_impl("https://example.com/article")
-        assert fallback_called
+        md, url = await _safe_legacy_fallback("https://example.com/article")
+        assert md == ""
 
     @pytest.mark.asyncio
-    async def test_200_does_not_trigger_fallback(self, monkeypatch):
-        """When curl_cffi returns 200 with valid content, no fallback should occur."""
+    async def test_curl_small_response_returns_empty(self, monkeypatch):
+        _patch_async_session(monkeypatch, _make_mock_response(text="<html>Tiny</html>"))
+        md, url = await _safe_legacy_fallback("https://example.com/article")
+        assert md == ""
+
+    @pytest.mark.asyncio
+    async def test_curl_success_returns_content(self, monkeypatch):
         large_html = (
             "<html><body>" + "<p>Content paragraph.</p>" * 100 + "</body></html>"
         )
         _patch_async_session(
             monkeypatch, _make_mock_response(status_code=200, text=large_html)
         )
+        md, url = await _safe_legacy_fallback("https://example.com/article")
+        assert len(md) > 10
 
-        fallback_called = False
-
-        async def mock_safe_fallback(url):
-            nonlocal fallback_called
-            fallback_called = True
-            return ("", url)
-
-        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_safe_fallback)
-
-        await _fetch_article_text_async_impl("https://example.com/article")
-        assert not fallback_called, "Fallback should NOT be triggered on valid HTTP 200"
-
-    def test_legacy_fetcher_rejects_403(self, monkeypatch):
-        """Legacy CloudScraper should mark 403 URLs as failed."""
-        mock_scraper = MagicMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 403
-        mock_response.url = "https://example.com/blocked"
-        mock_response.text = "<html>Blocked</html>"
-        mock_scraper.get.return_value = mock_response
-        monkeypatch.setattr("core.scraper._get_legacy_scraper", lambda: mock_scraper)
-
-        md, url = _fetch_legacy_sync("https://example.com/blocked")
+    @pytest.mark.asyncio
+    async def test_curl_exception_returns_empty(self, monkeypatch):
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock(side_effect=ConnectionError("down"))
+        monkeypatch.setattr("core.scraper._get_async_session", lambda: mock_session)
+        md, url = await _safe_legacy_fallback("https://example.com/article")
         assert md == ""
 
-    def test_legacy_fetcher_has_no_retry_decorator(self):
-        """_fetch_legacy_sync should NOT have @retry."""
-        assert not hasattr(_fetch_legacy_sync, "__wrapped__"), (
-            "_fetch_legacy_sync should not have @retry decorator (403 is a hard block)"
+
+# ===========================================================================
+# stealth-requests proxy support
+# ===========================================================================
+
+
+class TestStealthProxySupport:
+    """Verify _fetch_stealth_sync passes proxies dict to stealth_requests."""
+
+    def test_no_proxy_calls_without_proxies_kwarg(self, monkeypatch):
+        """When proxy is None, no 'proxies' kwarg is passed."""
+        captured_kwargs = {}
+
+        class MockRequests:
+            @staticmethod
+            def get(url, **kwargs):
+                captured_kwargs.update(kwargs)
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.url = url
+                resp.text = "<html><body>" + "<p>Content.</p>" * 200 + "</body></html>"
+                return resp
+
+        monkeypatch.setitem(sys.modules, "stealth_requests", MockRequests())
+
+        _fetch_stealth_sync("https://example.com/article", proxy=None)
+        assert "proxies" not in captured_kwargs
+
+    def test_proxy_passed_as_proxies_dict(self, monkeypatch):
+        """When proxy is provided, 'proxies' kwarg should be a dict."""
+        captured_kwargs = {}
+
+        class MockRequests:
+            @staticmethod
+            def get(url, **kwargs):
+                captured_kwargs.update(kwargs)
+                resp = MagicMock()
+                resp.status_code = 200
+                resp.url = url
+                resp.text = "<html><body>" + "<p>Content.</p>" * 200 + "</body></html>"
+                return resp
+
+        monkeypatch.setitem(sys.modules, "stealth_requests", MockRequests())
+
+        _fetch_stealth_sync(
+            "https://example.com/article", proxy="http://user:pass@proxy:8080"
         )
+        assert "proxies" in captured_kwargs
+        assert captured_kwargs["proxies"] == {
+            "https": "http://user:pass@proxy:8080",
+            "http": "http://user:pass@proxy:8080",
+        }
 
 
 # ===========================================================================
@@ -164,48 +278,23 @@ class TestMinimumResponseLength:
 
     @pytest.mark.asyncio
     async def test_small_response_triggers_fallback(self, monkeypatch):
-        _patch_async_session(monkeypatch, _make_mock_response(text="<html>Tiny</html>"))
+        """stealth-requests tiny response should trigger curl_cffi fallback."""
 
-        fallback_called = False
-
-        async def mock_safe_fallback(url):
-            nonlocal fallback_called
-            fallback_called = True
+        def mock_stealth(url, proxy=None):
             return ("", url)
 
-        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_safe_fallback)
+        curl_called = False
 
-        await _fetch_article_text_async_impl("https://example.com/article")
-        assert fallback_called, "Tiny response should trigger fallback cascade"
-
-    @pytest.mark.asyncio
-    async def test_normal_response_does_not_trigger(self, monkeypatch):
-        large_html = "<html><body>" + "<p>Content.</p>" * 200 + "</body></html>"
-        _patch_async_session(monkeypatch, _make_mock_response(text=large_html))
-
-        fallback_called = False
-
-        async def mock_safe_fallback(url):
-            nonlocal fallback_called
-            fallback_called = True
+        async def mock_curl(url):
+            nonlocal curl_called
+            curl_called = True
             return ("", url)
 
-        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_safe_fallback)
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth)
+        monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_curl)
 
         await _fetch_article_text_async_impl("https://example.com/article")
-        assert not fallback_called
-
-    def test_legacy_rejects_small_response(self, monkeypatch):
-        mock_scraper = MagicMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.url = "https://example.com/tiny"
-        mock_response.text = "<html>Small</html>"
-        mock_scraper.get.return_value = mock_response
-        monkeypatch.setattr("core.scraper._get_legacy_scraper", lambda: mock_scraper)
-
-        md, url = _fetch_legacy_sync("https://example.com/tiny")
-        assert md == ""
+        assert curl_called
 
 
 # ===========================================================================
@@ -302,14 +391,17 @@ class TestAsyncTimeout:
         """A slow scrape should be cancelled after SCRAPER_URL_TIMEOUT."""
         monkeypatch.setattr("core.scraper.SCRAPER_URL_TIMEOUT", 0.1)
 
-        slow_session = AsyncMock()
+        def slow_stealth(url, proxy=None):
+            import time
 
-        async def slow_get(*args, **kwargs):
-            await asyncio.sleep(5)
-            return _make_mock_response()
+            time.sleep(5)
+            return ("content", url)
 
-        slow_session.get = slow_get
-        monkeypatch.setattr("core.scraper._get_async_session", lambda: slow_session)
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", slow_stealth)
+        monkeypatch.setattr(
+            "core.scraper._safe_legacy_fallback",
+            AsyncMock(return_value=("", "https://example.com/slow")),
+        )
 
         semaphore = asyncio.Semaphore(5)
         result = await fetch_article_text_async("https://example.com/slow", semaphore)
@@ -318,8 +410,11 @@ class TestAsyncTimeout:
     @pytest.mark.asyncio
     async def test_fast_scrape_returns_result(self, monkeypatch):
         """A fast scrape should succeed normally."""
-        large_html = "<html><body>" + "<p>Article content.</p>" * 200 + "</body></html>"
-        _patch_async_session(monkeypatch, _make_mock_response(text=large_html))
+
+        def fast_stealth(url, proxy=None):
+            return ("Article content here. " * 50, url)
+
+        monkeypatch.setattr("core.scraper._fetch_stealth_sync", fast_stealth)
 
         semaphore = asyncio.Semaphore(5)
         result = await fetch_article_text_async("https://example.com/fast", semaphore)
@@ -328,18 +423,52 @@ class TestAsyncTimeout:
 
 
 # ===========================================================================
-# Proxy configuration
+# Proxy configuration (SCRAPER_PROXY_LIST)
 # ===========================================================================
 
 
 class TestProxyConfiguration:
-    """Verify that SCRAPER_PROXY is read from environment."""
+    """Verify that SCRAPER_PROXY_LIST and _next_proxy work correctly."""
 
-    def test_proxy_env_var_is_accessible(self):
-        assert SCRAPER_PROXY is None or isinstance(SCRAPER_PROXY, str)
+    def test_proxy_list_defaults_to_empty(self):
+        from core.config import SCRAPER_PROXY_LIST
 
-    def test_proxy_defaults_to_none(self):
-        assert SCRAPER_PROXY is None or isinstance(SCRAPER_PROXY, str)
+        assert isinstance(SCRAPER_PROXY_LIST, list)
+
+    def test_next_proxy_returns_none_when_empty(self, monkeypatch):
+        from core.config import _next_proxy
+
+        monkeypatch.setattr("core.config.SCRAPER_PROXY_LIST", [])
+        monkeypatch.setattr("core.config._proxy_cycle", None)
+        assert _next_proxy() is None
+
+    def test_next_proxy_rotates(self, monkeypatch):
+        from core.config import _next_proxy
+
+        monkeypatch.setattr(
+            "core.config.SCRAPER_PROXY_LIST",
+            ["http://proxy1:8080", "http://proxy2:8080"],
+        )
+        monkeypatch.setattr("core.config._proxy_cycle", None)
+        p1 = _next_proxy()
+        p2 = _next_proxy()
+        p3 = _next_proxy()
+        assert p1 == "http://proxy1:8080"
+        assert p2 == "http://proxy2:8080"
+        assert p3 == "http://proxy1:8080"
+
+    def test_single_proxy_returns_same(self, monkeypatch):
+        from core.config import _next_proxy
+
+        monkeypatch.setattr(
+            "core.config.SCRAPER_PROXY_LIST",
+            ["http://only-proxy:8080"],
+        )
+        monkeypatch.setattr("core.config._proxy_cycle", None)
+        p1 = _next_proxy()
+        p2 = _next_proxy()
+        assert p1 == "http://only-proxy:8080"
+        assert p2 == "http://only-proxy:8080"
 
 
 # ===========================================================================
@@ -479,7 +608,7 @@ class TestExpandedPreloadedDataRegex:
 
 
 class TestNewConstants:
-    """Smoke tests for new constants."""
+    """Smoke tests for constants."""
 
     def test_min_html_response_length_reasonable(self):
         assert MIN_HTML_RESPONSE_LENGTH >= 1000
@@ -518,7 +647,46 @@ class TestAsyncSessionLifecycle:
         result = _get_async_session()
         assert result is mock_session
 
-    def test_legacy_scraper_creation(self):
-        """_get_legacy_scraper should return a CloudScraper instance."""
-        scraper = _get_legacy_scraper()
-        assert scraper is not None
+
+# ===========================================================================
+# Burst delays (pipeline utility tested here for convenience)
+# ===========================================================================
+
+
+class TestBurstDelays:
+    """Tests for the _burst_delays function."""
+
+    def test_zero_urls_returns_empty(self):
+        from core.pipeline import _burst_delays
+
+        assert _burst_delays(0) == []
+
+    def test_one_url_returns_empty(self):
+        from core.pipeline import _burst_delays
+
+        assert _burst_delays(1) == []
+
+    def test_exactly_one_burst_returns_empty(self):
+        from core.pipeline import _burst_delays
+
+        assert _burst_delays(3, burst_size=3) == []
+
+    def test_two_bursts_returns_one_delay(self):
+        from core.pipeline import _burst_delays
+
+        delays = _burst_delays(4, burst_size=3)
+        assert len(delays) == 1
+        assert 5.0 <= delays[0] <= 12.0
+
+    def test_three_bursts_returns_two_delays(self):
+        from core.pipeline import _burst_delays
+
+        delays = _burst_delays(7, burst_size=3)
+        assert len(delays) == 2
+
+    def test_delays_within_range(self):
+        from core.pipeline import _burst_delays
+
+        delays = _burst_delays(10, burst_size=2, min_pause=3.0, max_pause=7.0)
+        for d in delays:
+            assert 3.0 <= d <= 7.0

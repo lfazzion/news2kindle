@@ -370,6 +370,12 @@ def _is_junk_section(text: str) -> bool:
 
 def _validate_config() -> None:
     """Validates required environment variables at startup (fail-fast)."""
+    if os.environ.get("SCRAPER_PROXY") and not os.environ.get("SCRAPER_PROXY_LIST"):
+        logger.warning(
+            "SCRAPER_PROXY is deprecated. Use SCRAPER_PROXY_LIST instead "
+            "(comma-separated list of proxy URLs). "
+            "The old variable will be ignored."
+        )
     missing: list[str] = []
     if not EMAIL_ACCOUNT:
         missing.append("EMAIL_ACCOUNT")
@@ -386,22 +392,32 @@ def _validate_config() -> None:
         )
 
 
-_proxy_cycle: itertools.cycle[str] | None = None
+class _ProxyRotator:
+    """Encapsulates round-robin proxy rotation over SCRAPER_PROXY_LIST.
+
+    Thread-safe for the call pattern used here (each URL calls _next_proxy once
+    before the request, so no concurrent access to the same cycle).
+    """
+
+    def __init__(self) -> None:
+        self._cycle: itertools.cycle[str] | None = None
+
+    def reset(self) -> None:
+        """Resets the cycle iterator. Use in tests to isolate state."""
+        self._cycle = None
+
+    def next(self) -> str | None:
+        """Returns the next proxy from the rotation, or None if list is empty."""
+        if not SCRAPER_PROXY_LIST:
+            return None
+        if self._cycle is None:
+            self._cycle = itertools.cycle(SCRAPER_PROXY_LIST)
+        return next(self._cycle)
 
 
-def _get_proxy_cycle() -> itertools.cycle[str] | None:
-    """Returns a cycle iterator over SCRAPER_PROXY_LIST, or None if empty."""
-    global _proxy_cycle
-    if not SCRAPER_PROXY_LIST:
-        return None
-    if _proxy_cycle is None:
-        _proxy_cycle = itertools.cycle(SCRAPER_PROXY_LIST)
-    return _proxy_cycle
+_proxy_rotator = _ProxyRotator()
 
 
 def _next_proxy() -> str | None:
     """Returns the next proxy from the rotation, or None if no proxies configured."""
-    cycle = _get_proxy_cycle()
-    if cycle is None:
-        return None
-    return next(cycle)
+    return _proxy_rotator.next()

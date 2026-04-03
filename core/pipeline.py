@@ -499,12 +499,10 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
                 all_results.append(result)
                 if result is None or not result[0]:
                     failed_urls.append(url)
-            try:
-                delay = next(delay_iter)
+            delay = next(delay_iter, None)
+            if delay is not None:
                 logger.info("Burst complete. Pausing %.1fs before next burst...", delay)
                 await asyncio.sleep(delay)
-            except StopIteration:
-                pass
 
         retry_candidates = failed_urls
         retry_still_failed: list[str] = []
@@ -529,11 +527,9 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
                         all_results.append(result)
                     else:
                         retry_still_failed.append(url)
-                try:
-                    delay = next(retry_delay_iter)
+                delay = next(retry_delay_iter, None)
+                if delay is not None:
                     await asyncio.sleep(delay)
-                except StopIteration:
-                    pass
             for u in retry_still_failed:
                 _FAILED_URLS_CACHE.add(_strip_query(u))
             if retry_still_failed:

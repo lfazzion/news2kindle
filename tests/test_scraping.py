@@ -391,17 +391,11 @@ class TestAsyncTimeout:
         """A slow scrape should be cancelled after SCRAPER_URL_TIMEOUT."""
         monkeypatch.setattr("core.scraper.SCRAPER_URL_TIMEOUT", 0.1)
 
-        def slow_stealth(url, proxy=None):
-            import time
-
-            time.sleep(5)
+        async def slow_impl(url):
+            await asyncio.sleep(10)
             return ("content", url)
 
-        monkeypatch.setattr("core.scraper._fetch_stealth_sync", slow_stealth)
-        monkeypatch.setattr(
-            "core.scraper._safe_legacy_fallback",
-            AsyncMock(return_value=("", "https://example.com/slow")),
-        )
+        monkeypatch.setattr("core.scraper._fetch_article_text_async_impl", slow_impl)
 
         semaphore = asyncio.Semaphore(5)
         result = await fetch_article_text_async("https://example.com/slow", semaphore)
@@ -436,20 +430,20 @@ class TestProxyConfiguration:
         assert isinstance(SCRAPER_PROXY_LIST, list)
 
     def test_next_proxy_returns_none_when_empty(self, monkeypatch):
-        from core.config import _next_proxy
+        from core.config import _next_proxy, _proxy_rotator
 
         monkeypatch.setattr("core.config.SCRAPER_PROXY_LIST", [])
-        monkeypatch.setattr("core.config._proxy_cycle", None)
+        _proxy_rotator.reset()
         assert _next_proxy() is None
 
     def test_next_proxy_rotates(self, monkeypatch):
-        from core.config import _next_proxy
+        from core.config import _next_proxy, _proxy_rotator
 
         monkeypatch.setattr(
             "core.config.SCRAPER_PROXY_LIST",
             ["http://proxy1:8080", "http://proxy2:8080"],
         )
-        monkeypatch.setattr("core.config._proxy_cycle", None)
+        _proxy_rotator.reset()
         p1 = _next_proxy()
         p2 = _next_proxy()
         p3 = _next_proxy()
@@ -458,13 +452,13 @@ class TestProxyConfiguration:
         assert p3 == "http://proxy1:8080"
 
     def test_single_proxy_returns_same(self, monkeypatch):
-        from core.config import _next_proxy
+        from core.config import _next_proxy, _proxy_rotator
 
         monkeypatch.setattr(
             "core.config.SCRAPER_PROXY_LIST",
             ["http://only-proxy:8080"],
         )
-        monkeypatch.setattr("core.config._proxy_cycle", None)
+        _proxy_rotator.reset()
         p1 = _next_proxy()
         p2 = _next_proxy()
         assert p1 == "http://only-proxy:8080"

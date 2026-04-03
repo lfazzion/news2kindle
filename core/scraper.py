@@ -50,7 +50,14 @@ _async_session: AsyncSession | None = None
 
 
 def _get_async_session() -> AsyncSession:
-    """Returns a lazily-initialised AsyncSession with Chrome TLS impersonation."""
+    """Returns a lazily-initialised AsyncSession with Chrome TLS impersonation.
+
+    Contract: the proxy is selected once at session creation time via
+    _next_proxy(). Subsequent calls return the same cached instance, so the
+    proxy does NOT rotate until _reset_async_session() is called. This is
+    intentional — curl_cffi's AsyncSession reuses connections and changing the
+    proxy mid-session would break the connection pool.
+    """
     global _async_session
     if _async_session is None:
         proxy = _next_proxy()

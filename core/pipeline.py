@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import random
+import time
 from dataclasses import asdict
 
 from google.genai import errors as genai_errors
@@ -31,7 +32,7 @@ from core.config import (
     _strip_query,
 )
 from core.email_client import _fetch_emails_sync, cleanup_emails, send_to_kindle
-from core.gemini import _generate_content_async, _get_genai_client
+from core.gemini import _generate_content_async, _get_genai_client, _local_count_tokens
 from core.prompts import HTML_TRANSLATE_PROMPT, JSON_CATEGORIZE_PROMPT
 from core.scraper import _reset_async_session, fetch_article_text_async
 
@@ -44,34 +45,18 @@ async def categorize_news(cache_global: list[CacheDocument]) -> dict | None:
     if not client:
         return None
 
-    async def get_item_tokens(item: dict) -> tuple[dict, int]:
+    def get_item_tokens(item: dict) -> tuple[dict, int]:
         prompt_segment = json.dumps(item, ensure_ascii=False) + ","
-        try:
-            resp = await client.aio.models.count_tokens(
-                model=ROUTER_MODEL, contents=prompt_segment
-            )
-            tokens = (
-                resp.total_tokens
-                if resp and resp.total_tokens
-                else len(prompt_segment) // 4
-            )
-        except Exception as e:
-            logger.warning(
-                "Router Token counter failed for an item, "
-                "falling back to string estimation: %s",
-                e,
-            )
-            tokens = len(prompt_segment) // 4
+        tokens = _local_count_tokens(ROUTER_MODEL, prompt_segment)
         return item, tokens
 
     logger.info(
-        "Phase 2: Pre-calculating exact tokens for %d cached document(s)...",
+        "Phase 2: Pre-calculating tokens for %d cached document(s) (local)...",
         len(cache_global),
     )
-    token_tasks = [
+    items_for_prompt = [
         get_item_tokens({"id": doc.id, "text": doc.text}) for doc in cache_global
     ]
-    items_for_prompt = await asyncio.gather(*token_tasks)
 
     chunks_json_str: list[str] = []
     current_chunk: list[dict] = []
@@ -236,10 +221,18 @@ def match_cache_to_groups(
     all_ids = {doc.id for doc in cache_global}
     orphans = all_ids - claimed_ids
     if orphans:
+        orphan_sizes: list[tuple[str, int]] = []
+        for doc in cache_global:
+            if doc.id in orphans:
+                orphan_sizes.append((doc.id, len(doc.text)))
+        size_summary = ", ".join(
+            f"{oid}({sz}c)" for oid, sz in sorted(orphan_sizes, key=lambda x: x[1])
+        )
         logger.warning(
-            "Matcher: %d document(s) not referenced by any group (Discarded): %s",
+            "Matcher: %d document(s) not referenced by any group (Discarded). "
+            "Orphan sizes: %s",
             len(orphans),
-            orphans,
+            size_summary,
         )
 
     logger.info(
@@ -305,24 +298,8 @@ async def summarize_text(enriched_news: list[EnrichedNews]) -> str | None:
         conteudo_junto = json.dumps(items_as_dicts, ensure_ascii=False)
 
         model_to_use = SHORT_NOTES_MODEL if nivel == "notas_curtas" else GENERATOR_MODEL
-
-        try:
-            resp = await client.aio.models.count_tokens(
-                model=model_to_use,
-                contents=HTML_TRANSLATE_PROMPT.format(
-                    level=nivel, content=conteudo_junto
-                ),
-            )
-            total_tokens = (
-                resp.total_tokens
-                if resp and resp.total_tokens
-                else (len(conteudo_junto) // 4)
-            )
-        except Exception as e:
-            logger.warning(
-                "Translator Token counter failed, falling back to estimation: %s", e
-            )
-            total_tokens = len(conteudo_junto) // 4
+        full_prompt = HTML_TRANSLATE_PROMPT.format(level=nivel, content=conteudo_junto)
+        total_tokens = _local_count_tokens(model_to_use, full_prompt)
 
         if total_tokens <= MAX_TOKENS_PER_CHUNK:
             response = await _generate_content_async(
@@ -585,7 +562,13 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
 
 async def process_newsletters() -> None:
     """Main pipeline V3: fetch → cache → route → match → translate → send → cleanup."""
+    t_total = time.monotonic()
     logger.info("Starting process_newsletters (V3 Cache Routing)...")
+    metrics: dict[str, float | int | str] = {
+        "phase1_s": 0.0,
+        "phase2_s": 0.0,
+        "phase3_s": 0.0,
+    }
 
     cache_global: list[CacheDocument] = []
     emails_to_delete: list[str] = []
@@ -626,7 +609,9 @@ async def process_newsletters() -> None:
     if not use_local_cache:
         try:
             logger.info("Phase 1: Extracting content and building local cache…")
+            t1 = time.monotonic()
             cache_global, emails_to_delete = await extract_all_content_async()
+            metrics["phase1_s"] = round(time.monotonic() - t1, 1)
 
             if cache_global:
                 try:
@@ -655,7 +640,9 @@ async def process_newsletters() -> None:
         return
 
     logger.info("Phase 2: Routing content with %s…", ROUTER_MODEL)
+    t2 = time.monotonic()
     routing_json = await categorize_news(cache_global)
+    metrics["phase2_s"] = round(time.monotonic() - t2, 1)
     if not routing_json:
         logger.error("Failed to route/categorize news into JSON.")
         return
@@ -670,7 +657,9 @@ async def process_newsletters() -> None:
         return
 
     logger.info("Phase 3: Generating final HTML content with %s…", GENERATOR_MODEL)
+    t3 = time.monotonic()
     summary = await summarize_text(enriched_news)
+    metrics["phase3_s"] = round(time.monotonic() - t3, 1)
     if not summary:
         logger.error("Failed to generate final HTML summary.")
         return
@@ -691,3 +680,14 @@ async def process_newsletters() -> None:
             except Exception as e:
                 logger.warning("Failed to remove cache file %s: %s", cache_path, e)
     logger.info("Local failover cache files purged.")
+
+    metrics["total_s"] = round(time.monotonic() - t_total, 1)
+    metrics["docs"] = len(cache_global)
+    metrics["groups"] = len(enriched_news)
+    logger.info(
+        "=== Pipeline Summary ===  "
+        "docs=%(docs)d  groups=%(groups)d  "
+        "p1=%(phase1_s).1fs  p2=%(phase2_s).1fs  p3=%(phase3_s).1fs  "
+        "total=%(total_s).1fs",
+        metrics,
+    )

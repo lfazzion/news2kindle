@@ -564,7 +564,11 @@ async def process_newsletters() -> None:
     """Main pipeline V3: fetch → cache → route → match → translate → send → cleanup."""
     t_total = time.monotonic()
     logger.info("Starting process_newsletters (V3 Cache Routing)...")
-    metrics: dict[str, float | int | str] = {}
+    metrics: dict[str, float | int | str] = {
+        "phase1_s": 0.0,
+        "phase2_s": 0.0,
+        "phase3_s": 0.0,
+    }
 
     cache_global: list[CacheDocument] = []
     emails_to_delete: list[str] = []

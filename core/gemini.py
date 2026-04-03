@@ -144,7 +144,9 @@ async def _generate_content_async(
         async with rpm_limiter:
             return await _generate_content_retry(client, prompt, model)
     except Exception as e:
-        logger.warning("Error during token counting or generation: %s", e)
+        logger.warning(
+            "Error during token counting or generation: %s", e, exc_info=True
+        )
 
         # Build fallback chain: Gemma first, then SHORT_NOTES_MODEL (if different)
         fallback_chain: list[str] = []
@@ -175,7 +177,6 @@ async def _generate_content_async(
                     return await _generate_content_retry(client, prompt, fallback_model)
             except Exception:
                 logger.warning("Fallback model %s also failed.", fallback_model)
-                model = fallback_model
 
         logger.error("All fallback models exhausted.")
         raise

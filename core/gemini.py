@@ -70,32 +70,12 @@ def _get_genai_client() -> genai.Client | None:
 
 
 # ---------------------------------------------------------------------------
-# Token counting
+# Token counting (local estimation — no LocalTokenizer in google-genai SDK)
 # ---------------------------------------------------------------------------
-
-_local_tokenizers: dict[str, genai.LocalTokenizer | None] = {}
 
 
 def _local_count_tokens(model: str, text: str) -> int:
-    """Count tokens using LocalTokenizer with HTTP fallback."""
-    if model in _local_tokenizers:
-        tokenizer = _local_tokenizers[model]
-    else:
-        tokenizer = None
-        try:
-            tokenizer = genai.LocalTokenizer(model_name=model)
-        except Exception:
-            logger.debug("LocalTokenizer unavailable for %s, using estimation.", model)
-        _local_tokenizers[model] = tokenizer
-
-    if tokenizer is not None:
-        try:
-            result = tokenizer.count_tokens(text)
-            if result and result.total_tokens is not None:
-                return result.total_tokens
-        except Exception:
-            logger.debug("LocalTokenizer failed for %s, using estimation.", model)
-
+    """Estimate token count using a simple character-based heuristic."""
     return len(text) // 4
 
 

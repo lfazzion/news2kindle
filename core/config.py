@@ -1,0 +1,382 @@
+"""Shared constants, dataclasses, and helper functions for the newsletter pipeline."""
+
+import logging
+import os
+import re
+from dataclasses import dataclass
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Environment & configuration
+# ---------------------------------------------------------------------------
+
+EMAIL_ACCOUNT: str | None = os.environ.get("EMAIL_ACCOUNT")
+EMAIL_PASSWORD: str | None = os.environ.get("EMAIL_PASSWORD")
+IMAP_SERVER: str = os.environ.get("IMAP_SERVER") or "imap.gmail.com"
+SMTP_SERVER: str = os.environ.get("SMTP_SERVER") or "smtp.gmail.com"
+SMTP_PORT: int = int(os.environ.get("SMTP_PORT") or "587")
+KINDLE_EMAIL: str | None = os.environ.get("KINDLE_EMAIL")
+GOOGLE_API_KEY: str | None = os.environ.get("GOOGLE_API_KEY")
+SCRAPER_PROXY: str | None = os.environ.get("SCRAPER_PROXY") or os.environ.get(
+    "HTTPS_PROXY"
+)
+
+NYT_SENDERS: list[str] = [
+    "nytdirect@nytimes.com",
+    "breakingnews@nytimes.com",
+    "yourplaces-globalupdate-noreply@nytimes.com",
+]
+
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CacheDocument:
+    """A single cached document extracted from a newsletter or external link."""
+
+    id: str
+    source: str
+    text: str
+
+
+@dataclass
+class EnrichedNews:
+    """A fully enriched news item with merged content ready for translation."""
+
+    title: str
+    level: str
+    content: str
+    anchor_id: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Named constants
+# ---------------------------------------------------------------------------
+
+MAX_TOKENS_PER_CHUNK = 180_000
+MIN_JSON_EXTRACT_LENGTH = 500
+JUNK_FOOTER_MAX_LENGTH = 3000
+JUNK_GAMES_MAX_LENGTH = 1500
+_MIN_SECTION_LENGTH = 100
+SCRAPER_CONCURRENCY = 3
+SCRAPER_BATCH_DELAY = 8.0
+SCRAPER_RETRY_DELAY = 30.0
+MIN_HTML_RESPONSE_LENGTH = 2000
+HTTP_BLOCK_STATUS_CODES: frozenset[int] = frozenset({403, 429, 451, 503})
+SCRAPER_URL_TIMEOUT = 30.0
+
+_FAILED_URLS_CACHE: set[str] = set()
+
+LEVEL_ORDER: list[str] = ["principal", "secundaria", "notas_curtas"]
+LEVEL_PRIORITY: dict[str, int] = {"principal": 0, "secundaria": 1, "notas_curtas": 2}
+_LEVEL_MERGE_PRIORITY: dict[str, int] = {
+    "principal": 3,
+    "secundaria": 2,
+    "notas_curtas": 1,
+}
+
+_INDEX_TITLES: dict[str, str] = {
+    "principal": "Editoriais Principais",
+    "secundaria": "Giro de Notícias",
+    "notas_curtas": "Notas Curtas",
+}
+
+ROUTER_MODEL = "gemini-3.1-flash-lite-preview"
+GENERATOR_MODEL = "gemini-3-flash-preview"
+SHORT_NOTES_MODEL = "gemini-2.5-flash"
+
+CACHE_FILE = "cache_nytt_latest.json"
+CACHE_UIDS_FILE = "cache_nytt_uids.json"
+
+# ---------------------------------------------------------------------------
+# Frozensets
+# ---------------------------------------------------------------------------
+
+_ADMIN_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "unsubscribe",
+        "privacy",
+        "manage",
+        "browser",
+        "preference",
+        "contact",
+        "california",
+        "subscribe",
+        "nytimes.com",
+        "app",
+        "help",
+        "here",
+        "wordle",
+        "connections",
+        "strands",
+        "spelling bee",
+        "crossword",
+        "mini",
+        "email",
+        "opt out",
+        "sudoku",
+        "flashback",
+        "the daily",
+        "podcast",
+        "audio",
+        "wirecutter",
+        "play the",
+        "games",
+        "recipe",
+        "review",
+        "guest essay",
+        "interesting times",
+        "i have some questions for you",
+        "introductory offer",
+        "keep them coming",
+        "tell us what you want",
+        "take a tour",
+        "sign up",
+    }
+)
+_EXACT_IGNORED_TEXTS: frozenset[str] = frozenset(
+    {
+        "newsletter help page",
+        "go to home page",
+        "see more technology news",
+        "letters to the editor",
+        "the new york times",
+        "the financial times",
+        "combine moves",
+        "take this advice for a spin",
+        "the numbers",
+        "here is today's recipe",
+        "mini crossword",
+    }
+)
+_IGNORED_AUTHORS: frozenset[str] = frozenset(
+    {
+        "katrin bennhold",
+        "andrew ross sorkin",
+        "bernhard warner",
+        "sarah kessler",
+        "michael j. de la merced",
+        "niko gallogly",
+        "lauren hirsch",
+        "brian o'keefe",
+        "sam sifton",
+        "sean dong",
+        "sisi yu",
+        "diego patiño",
+        "jessica grose",
+        "david wallace-wells",
+    }
+)
+_DENY_DOMAINS: frozenset[str] = frozenset(
+    {
+        "wsj.com",
+        "washingtonpost.com",
+        "bloomberg.com",
+        "ft.com",
+        "cnbc.com",
+        "finance.yahoo.com",
+        "cato.org",
+        "anthropic.com",
+        "axios.com",
+        "businessinsider.com",
+        "reuters.com",
+        "x.com",
+        "youtube.com",
+        "instagram.com",
+        "tiktok.com",
+        "msn.com",
+    }
+)
+_DENY_PATHS: frozenset[str] = frozenset(
+    {
+        "/cooking/",
+        "/wirecutter/",
+        "/interactive/",
+        "/live/",
+        "/video/",
+        "/puzzles/",
+        "/crosswords/",
+    }
+)
+
+_BLOCKED_PHRASES: frozenset[str] = frozenset(
+    {
+        "atividade incomum na rede",
+        "not a robot",
+        "prove you are human",
+        "unusual activity",
+        "access denied",
+        "javascript is disabled",
+        "enable js",
+        "server error",
+        "captcha",
+        "challenge-platform",
+        "cf-browser-verification",
+        "ddos-protection",
+        "checking your browser",
+    }
+)
+
+_JUNK_BAD_HEADERS: frozenset[str] = frozenset(
+    {
+        "### games",
+        "## play today's games",
+        "### time to play",
+        "### now time to play",
+        "dealbook quiz",
+        "time to play",
+    }
+)
+_JUNK_FOOTER_SIGNALS: frozenset[str] = frozenset(
+    {
+        "california notices",
+        "newsletter help page",
+        "opt out of other promotional emails",
+        "change your emailcontact us",
+    }
+)
+_JUNK_GAMES_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "wordle",
+        "sudoku",
+        "crossword",
+        "spelling bee",
+        "connections",
+        "strands",
+        "mini",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# Regex patterns
+# ---------------------------------------------------------------------------
+
+_NOISE_PHRASE_RE = re.compile(
+    r"(?:unsubscribe|view in browser|manage preferences"
+    r"|copyright ©|all rights reserved|privacy policy"
+    r"|terms of service|manage your\s*email\s*settings"
+    r"|was this newsletter forwarded to you\?\s*sign up here\.?"
+    r"|you received this email because[^.]*\."
+    r"|if you received this newsletter from someone else[^.]*\.)",
+    re.IGNORECASE,
+)
+
+_NOISE_LINE_RE = re.compile(
+    r"^\s*(?:nytimes\.com|the new york times company\.?\s*\d.*|connect with us on:?"
+    r"|\d+ eighth avenue.*)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_PRELOADED_JSON_RE = re.compile(
+    r"window\.(?:__preloadedData|__NEXT_DATA__|__PRELOADED_STATE__)\s*=\s*(\{.*?\});",
+    re.DOTALL,
+)
+
+_TABLE_TAG_RE = re.compile(
+    r"</?(?:table|tbody|thead|tfoot|tr|td|th)[^>]*>",
+    re.IGNORECASE,
+)
+
+_SECTION_SPLIT_RE = re.compile(
+    r"(?=^#{2,3}\s)"
+    r"|(?:^-{3,}$|^\*{3,}$)"
+    r"|(?=^\*\*[A-Z][^*]{5,}\*\*\s*$)",
+    re.MULTILINE,
+)
+
+_CODE_FENCE_RE = re.compile(r"```(?:json|html)?\s*(.*?)```", re.DOTALL)
+
+_EXCESS_NEWLINE_RE = re.compile(r"\n{3,}")
+
+_MARKDOWNIFY_TAGS: list[str] = [
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "ul",
+    "ol",
+    "li",
+    "strong",
+    "b",
+    "em",
+    "i",
+    "blockquote",
+    "figure",
+    "figcaption",
+]
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_blocked_content(text: str) -> bool:
+    """Returns True if *text* contains anti-bot or error-wall markers."""
+    text_lower = text.lower()
+    return any(phrase in text_lower for phrase in _BLOCKED_PHRASES)
+
+
+def _strip_query(url: str) -> str:
+    """Removes query string from a URL."""
+    return url.split("?")[0]
+
+
+def _extract_clean_response(text: str) -> str:
+    """Strips optional markdown code fences from an LLM response."""
+    match = _CODE_FENCE_RE.search(text)
+    return match.group(1).strip() if match else text.strip()
+
+
+def _is_admin_text(text: str, admin_keywords: set[str] | frozenset[str]) -> bool:
+    """Returns True if *text* matches any administrative keyword."""
+    return any(kw in text for kw in admin_keywords)
+
+
+def _is_junk_section(text: str) -> bool:
+    """Detects if a markdown text chunk is purely administrative or games/quiz."""
+    text_lower = text.lower()
+
+    first_lines = [line.strip() for line in text_lower.split("\n")[:3]]
+    for line in first_lines:
+        if (
+            any(line.startswith(bh) for bh in _JUNK_BAD_HEADERS)
+            or line in _JUNK_BAD_HEADERS
+        ):
+            return True
+
+    if (
+        any(sig in text_lower for sig in _JUNK_FOOTER_SIGNALS)
+        and len(text) < JUNK_FOOTER_MAX_LENGTH
+    ):
+        return True
+
+    matches = sum(1 for kw in _JUNK_GAMES_KEYWORDS if kw in text_lower)
+    return matches >= 2 and len(text) < JUNK_GAMES_MAX_LENGTH
+
+
+def _validate_config() -> None:
+    """Validates required environment variables at startup (fail-fast)."""
+    missing: list[str] = []
+    if not EMAIL_ACCOUNT:
+        missing.append("EMAIL_ACCOUNT")
+    if not EMAIL_PASSWORD:
+        missing.append("EMAIL_PASSWORD")
+    if not KINDLE_EMAIL:
+        missing.append("KINDLE_EMAIL")
+    if not GOOGLE_API_KEY:
+        missing.append("GOOGLE_API_KEY")
+    if missing:
+        raise SystemExit(
+            f"Missing required environment variable(s): {', '.join(missing)}. "
+            "Please check your .env file."
+        )

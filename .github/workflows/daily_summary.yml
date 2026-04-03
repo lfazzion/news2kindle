@@ -1,0 +1,41 @@
+name: Daily Newsletter Summarizer
+
+on:
+  schedule:
+    # Run every day at 13:20 UTC (10:20 BRT)
+    - cron: '20 13 * * *'
+  workflow_dispatch: # Allows you to run this workflow manually from the Actions tab
+
+jobs:
+  run-summarizer:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          IMAP_SERVER: ${{ secrets.IMAP_SERVER }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          KINDLE_EMAIL: ${{ secrets.KINDLE_EMAIL }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          # Optional: residential proxy to bypass Cloudflare datacenter IP blocking.
+          # Format: "http://user:pass@proxy-host:port" or "socks5://user:pass@proxy-host:port"
+          # GitHub Actions runs on Azure datacenter IPs which Cloudflare scrutinises more.
+          SCRAPER_PROXY: ${{ secrets.SCRAPER_PROXY }}
+        run: python main.py

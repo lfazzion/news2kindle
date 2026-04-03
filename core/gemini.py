@@ -1,0 +1,140 @@
+"""Google GenAI integration with retry and rate limiting."""
+
+import logging
+
+from aiolimiter import AsyncLimiter
+from google import genai
+from google.genai import errors as genai_errors
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+from core.config import (
+    GENERATOR_MODEL,
+    GOOGLE_API_KEY,
+    ROUTER_MODEL,
+    SHORT_NOTES_MODEL,
+)
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Rate limiters — lazy initialization to avoid binding to a closed event loop
+# ---------------------------------------------------------------------------
+
+MODEL_RPM_LIMITERS: dict[str, AsyncLimiter] | None = None
+MODEL_TPM_LIMITERS: dict[str, AsyncLimiter] | None = None
+
+
+def _init_limiters() -> None:
+    """Lazily initializes the AsyncLimiter instances for RPM and TPM."""
+    global MODEL_RPM_LIMITERS, MODEL_TPM_LIMITERS
+    if MODEL_RPM_LIMITERS is None:
+        MODEL_RPM_LIMITERS = {
+            ROUTER_MODEL: AsyncLimiter(14, 60.0),
+            GENERATOR_MODEL: AsyncLimiter(4, 60.0),
+            SHORT_NOTES_MODEL: AsyncLimiter(4, 60.0),
+        }
+    if MODEL_TPM_LIMITERS is None:
+        MODEL_TPM_LIMITERS = {
+            ROUTER_MODEL: AsyncLimiter(200_000, 60.0),
+            GENERATOR_MODEL: AsyncLimiter(200_000, 60.0),
+            SHORT_NOTES_MODEL: AsyncLimiter(200_000, 60.0),
+        }
+
+
+# ---------------------------------------------------------------------------
+# GenAI client singleton
+# ---------------------------------------------------------------------------
+
+_genai_client: genai.Client | None = None
+
+
+def _get_genai_client() -> genai.Client | None:
+    """Returns a cached Google GenAI client singleton, or None if the key is missing."""
+    global _genai_client
+    if _genai_client is not None:
+        return _genai_client
+    if not GOOGLE_API_KEY:
+        logger.error("GOOGLE_API_KEY not set.")
+        return None
+    _init_limiters()
+    _genai_client = genai.Client(api_key=GOOGLE_API_KEY)
+    return _genai_client
+
+
+# ---------------------------------------------------------------------------
+# Content generation
+# ---------------------------------------------------------------------------
+
+
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1.5, min=4, max=45),
+    retry=retry_if_exception_type(
+        (genai_errors.APIError, ConnectionError, TimeoutError)
+    ),
+    reraise=True,
+)
+async def _generate_content_retry(
+    client: genai.Client,
+    prompt: str,
+    model: str,
+) -> genai.types.GenerateContentResponse:
+    """Internal retry block. It will fail after 5 attempts."""
+    return await client.aio.models.generate_content(
+        model=model,
+        contents=prompt,
+    )
+
+
+async def _generate_content_async(
+    client: genai.Client,
+    prompt: str,
+    model: str = GENERATOR_MODEL,
+) -> genai.types.GenerateContentResponse:
+    """Calls Gemini with automatic retry, token counting, and rate limiting."""
+    _init_limiters()
+    assert MODEL_RPM_LIMITERS is not None and MODEL_TPM_LIMITERS is not None
+
+    rpm_limiter = MODEL_RPM_LIMITERS.get(model, MODEL_RPM_LIMITERS[GENERATOR_MODEL])
+    tpm_limiter = MODEL_TPM_LIMITERS.get(model, MODEL_TPM_LIMITERS[GENERATOR_MODEL])
+    exact_tokens: int = len(prompt) // 4
+
+    try:
+        token_response = await client.aio.models.count_tokens(
+            model=model, contents=prompt
+        )
+        if token_response and token_response.total_tokens is not None:
+            exact_tokens = token_response.total_tokens
+
+        tokens_to_acquire = min(exact_tokens, tpm_limiter.max_rate)
+
+        await tpm_limiter.acquire(tokens_to_acquire)
+        async with rpm_limiter:
+            return await _generate_content_retry(client, prompt, model)
+    except Exception as e:
+        logger.warning("Error during token counting or generation: %s", e)
+        if model in (SHORT_NOTES_MODEL, ROUTER_MODEL):
+            logger.error("Failed to generate content with %s after all retries.", model)
+            raise
+
+        logger.warning(
+            "Model %s failed after all retries. Falling back to robust model: %s",
+            model,
+            SHORT_NOTES_MODEL,
+        )
+        try:
+            fallback_tpm_limiter = MODEL_TPM_LIMITERS[SHORT_NOTES_MODEL]
+            fallback_rpm_limiter = MODEL_RPM_LIMITERS[SHORT_NOTES_MODEL]
+
+            tokens_to_acquire = min(exact_tokens, fallback_tpm_limiter.max_rate)
+            await fallback_tpm_limiter.acquire(tokens_to_acquire)
+            async with fallback_rpm_limiter:
+                return await _generate_content_retry(client, prompt, SHORT_NOTES_MODEL)
+        except Exception:
+            logger.error("Fallback model %s also failed.", SHORT_NOTES_MODEL)
+            raise

@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+# ---------------------------------------------------------------------------
+# Coverage (coverage.py + pytest-cov)
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["core", "main.py"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"

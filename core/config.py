@@ -406,7 +406,7 @@ class _ProxyRotator:
         """Resets the cycle iterator. Use in tests to isolate state."""
         self._cycle = None
 
-    def next(self) -> str | None:
+    def get_next(self) -> str | None:
         """Returns the next proxy from the rotation, or None if list is empty."""
         if not SCRAPER_PROXY_LIST:
             return None
@@ -420,4 +420,4 @@ _proxy_rotator = _ProxyRotator()
 
 def _next_proxy() -> str | None:
     """Returns the next proxy from the rotation, or None if no proxies configured."""
-    return _proxy_rotator.next()
+    return _proxy_rotator.get_next()

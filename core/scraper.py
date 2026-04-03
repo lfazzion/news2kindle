@@ -52,29 +52,22 @@ _async_session: AsyncSession | None = None
 def _get_async_session() -> AsyncSession:
     """Returns a lazily-initialised AsyncSession with Chrome TLS impersonation.
 
-    Contract: the proxy is selected once at session creation time via
-    _next_proxy(). Subsequent calls return the same cached instance, so the
-    proxy does NOT rotate until _reset_async_session() is called. This is
-    intentional — curl_cffi's AsyncSession reuses connections and changing the
-    proxy mid-session would break the connection pool.
+    The session reuses TLS connections for fingerprint consistency.
+    Proxy is NOT set here — it is passed per-request via proxy= parameter
+    in _safe_legacy_fallback() to enable round-robin rotation.
     """
     global _async_session
     if _async_session is None:
-        proxy = _next_proxy()
         _async_session = AsyncSession(
             impersonate="chrome",
-            proxy=proxy,
             headers=_BROWSER_HEADERS,
         )
-        if proxy:
-            logger.info("Scraper proxy configured: %s…", proxy[:30])
-        else:
-            logger.info("No scraper proxy configured — using direct datacenter IP.")
+        logger.debug("curl_cffi AsyncSession created (no proxy on session).")
     return _async_session
 
 
 async def _reset_async_session() -> None:
-    """Closes the current AsyncSession and creates a fresh one."""
+    """Closes the current AsyncSession so a fresh one is created on next use."""
     global _async_session
     if _async_session:
         import contextlib
@@ -82,7 +75,6 @@ async def _reset_async_session() -> None:
         with contextlib.suppress(Exception):
             await _async_session.close()
     _async_session = None
-    _get_async_session()
 
 
 # ---------------------------------------------------------------------------
@@ -254,11 +246,14 @@ def _fetch_stealth_sync(url: str, proxy: str | None = None) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
-async def _safe_legacy_fallback(url: str) -> tuple[str, str]:
-    """Fallback: curl_cffi AsyncSession. Never raises."""
+async def _safe_legacy_fallback(
+    url: str,
+    proxy: str | None = None,
+) -> tuple[str, str]:
+    """Fallback: curl_cffi AsyncSession with per-request proxy rotation."""
     session = _get_async_session()
     try:
-        req = await session.get(url, timeout=SCRAPER_URL_TIMEOUT)
+        req = await session.get(url, proxy=proxy, timeout=SCRAPER_URL_TIMEOUT)
         resolved_url = _strip_query(req.url)
         html = req.text
 
@@ -309,8 +304,8 @@ async def _fetch_article_text_async_impl(url: str) -> tuple[str, str]:
             e,
         )
 
-    # Step 2: curl_cffi (fallback, async)
-    return await _safe_legacy_fallback(url)
+    # Step 2: curl_cffi (fallback, async) — proxy rotativo por request
+    return await _safe_legacy_fallback(url, proxy)
 
 
 # ---------------------------------------------------------------------------

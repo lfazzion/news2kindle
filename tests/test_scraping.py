@@ -72,10 +72,10 @@ class TestCascadeOrder:
             stealth_called = True
             return ("stealth content", url)
 
-        async def mock_curl_fallback(url):
+        async def mock_curl_fallback(url, proxy=None):
             nonlocal curl_fallback_called
             curl_fallback_called = True
-            return ("curl content", url)
+            return ("stealth content via curl", url)
 
         monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth)
         monkeypatch.setattr("core.scraper._safe_legacy_fallback", mock_curl_fallback)
@@ -96,7 +96,7 @@ class TestCascadeOrder:
             stealth_called = True
             return ("", url)
 
-        async def mock_curl_fallback(url):
+        async def mock_curl_fallback(url, proxy=None):
             nonlocal curl_fallback_called
             curl_fallback_called = True
             return ("curl fallback content", url)
@@ -118,7 +118,7 @@ class TestCascadeOrder:
 
         curl_fallback_called = False
 
-        async def mock_curl_fallback(url):
+        async def mock_curl_fallback(url, proxy=None):
             nonlocal curl_fallback_called
             curl_fallback_called = True
             return ("curl recovered", url)
@@ -137,7 +137,7 @@ class TestCascadeOrder:
         def mock_stealth(url, proxy=None):
             return ("", url)
 
-        async def mock_curl_fallback(url):
+        async def mock_curl_fallback(url, proxy=None):
             return ("", url)
 
         monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth)
@@ -285,7 +285,7 @@ class TestMinimumResponseLength:
 
         curl_called = False
 
-        async def mock_curl(url):
+        async def mock_curl(url, proxy=None):
             nonlocal curl_called
             curl_called = True
             return ("", url)

@@ -13,6 +13,7 @@ from tenacity import (
 )
 
 from core.config import (
+    GEMMA_FALLBACK_MODEL,
     GENERATOR_MODEL,
     GOOGLE_API_KEY,
     ROUTER_MODEL,
@@ -37,12 +38,14 @@ def _init_limiters() -> None:
             ROUTER_MODEL: AsyncLimiter(14, 60.0),
             GENERATOR_MODEL: AsyncLimiter(4, 60.0),
             SHORT_NOTES_MODEL: AsyncLimiter(4, 60.0),
+            GEMMA_FALLBACK_MODEL: AsyncLimiter(15, 60.0),
         }
     if MODEL_TPM_LIMITERS is None:
         MODEL_TPM_LIMITERS = {
             ROUTER_MODEL: AsyncLimiter(200_000, 60.0),
             GENERATOR_MODEL: AsyncLimiter(200_000, 60.0),
             SHORT_NOTES_MODEL: AsyncLimiter(200_000, 60.0),
+            # Gemma 4 31B — no TPM limit, only RPM
         }
 
 
@@ -64,6 +67,36 @@ def _get_genai_client() -> genai.Client | None:
     _init_limiters()
     _genai_client = genai.Client(api_key=GOOGLE_API_KEY)
     return _genai_client
+
+
+# ---------------------------------------------------------------------------
+# Token counting
+# ---------------------------------------------------------------------------
+
+_local_tokenizers: dict[str, genai.LocalTokenizer | None] = {}
+
+
+def _local_count_tokens(model: str, text: str) -> int:
+    """Count tokens using LocalTokenizer with HTTP fallback."""
+    if model in _local_tokenizers:
+        tokenizer = _local_tokenizers[model]
+    else:
+        tokenizer = None
+        try:
+            tokenizer = genai.LocalTokenizer(model_name=model)
+        except Exception:
+            logger.debug("LocalTokenizer unavailable for %s, using estimation.", model)
+        _local_tokenizers[model] = tokenizer
+
+    if tokenizer is not None:
+        try:
+            result = tokenizer.count_tokens(text)
+            if result and result.total_tokens is not None:
+                return result.total_tokens
+        except Exception:
+            logger.debug("LocalTokenizer failed for %s, using estimation.", model)
+
+    return len(text) // 4
 
 
 # ---------------------------------------------------------------------------
@@ -101,40 +134,48 @@ async def _generate_content_async(
     assert MODEL_RPM_LIMITERS is not None and MODEL_TPM_LIMITERS is not None
 
     rpm_limiter = MODEL_RPM_LIMITERS.get(model, MODEL_RPM_LIMITERS[GENERATOR_MODEL])
-    tpm_limiter = MODEL_TPM_LIMITERS.get(model, MODEL_TPM_LIMITERS[GENERATOR_MODEL])
-    exact_tokens: int = len(prompt) // 4
+    tpm_limiter = MODEL_TPM_LIMITERS.get(model)
+    exact_tokens = _local_count_tokens(model, prompt)
 
     try:
-        token_response = await client.aio.models.count_tokens(
-            model=model, contents=prompt
-        )
-        if token_response and token_response.total_tokens is not None:
-            exact_tokens = token_response.total_tokens
-
-        tokens_to_acquire = min(exact_tokens, tpm_limiter.max_rate)
-
-        await tpm_limiter.acquire(tokens_to_acquire)
+        if tpm_limiter is not None:
+            tokens_to_acquire = min(exact_tokens, tpm_limiter.max_rate)
+            await tpm_limiter.acquire(tokens_to_acquire)
         async with rpm_limiter:
             return await _generate_content_retry(client, prompt, model)
     except Exception as e:
         logger.warning("Error during token counting or generation: %s", e)
-        if model in (SHORT_NOTES_MODEL, ROUTER_MODEL):
-            logger.error("Failed to generate content with %s after all retries.", model)
+
+        # Build fallback chain: Gemma first, then SHORT_NOTES_MODEL (if different)
+        fallback_chain: list[str] = []
+        if model != GEMMA_FALLBACK_MODEL:
+            fallback_chain.append(GEMMA_FALLBACK_MODEL)
+        if model != SHORT_NOTES_MODEL and GEMMA_FALLBACK_MODEL != SHORT_NOTES_MODEL:
+            fallback_chain.append(SHORT_NOTES_MODEL)
+
+        if not fallback_chain:
+            logger.error("No fallback available for %s.", model)
             raise
 
-        logger.warning(
-            "Model %s failed after all retries. Falling back to robust model: %s",
-            model,
-            SHORT_NOTES_MODEL,
-        )
-        try:
-            fallback_tpm_limiter = MODEL_TPM_LIMITERS[SHORT_NOTES_MODEL]
-            fallback_rpm_limiter = MODEL_RPM_LIMITERS[SHORT_NOTES_MODEL]
+        for fallback_model in fallback_chain:
+            logger.warning(
+                "Model %s failed. Falling back to: %s",
+                model,
+                fallback_model,
+            )
+            try:
+                fb_rpm = MODEL_RPM_LIMITERS.get(
+                    fallback_model, MODEL_RPM_LIMITERS[GENERATOR_MODEL]
+                )
+                fb_tpm = MODEL_TPM_LIMITERS.get(fallback_model)
+                if fb_tpm is not None:
+                    tokens_to_acquire = min(exact_tokens, fb_tpm.max_rate)
+                    await fb_tpm.acquire(tokens_to_acquire)
+                async with fb_rpm:
+                    return await _generate_content_retry(client, prompt, fallback_model)
+            except Exception:
+                logger.warning("Fallback model %s also failed.", fallback_model)
+                model = fallback_model
 
-            tokens_to_acquire = min(exact_tokens, fallback_tpm_limiter.max_rate)
-            await fallback_tpm_limiter.acquire(tokens_to_acquire)
-            async with fallback_rpm_limiter:
-                return await _generate_content_retry(client, prompt, SHORT_NOTES_MODEL)
-        except Exception:
-            logger.error("Fallback model %s also failed.", SHORT_NOTES_MODEL)
-            raise
+        logger.error("All fallback models exhausted.")
+        raise

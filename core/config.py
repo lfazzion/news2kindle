@@ -1,5 +1,6 @@
 """Shared constants, dataclasses, and helper functions for the newsletter pipeline."""
 
+import itertools
 import logging
 import os
 import re
@@ -22,9 +23,12 @@ SMTP_SERVER: str = os.environ.get("SMTP_SERVER") or "smtp.gmail.com"
 SMTP_PORT: int = int(os.environ.get("SMTP_PORT") or "587")
 KINDLE_EMAIL: str | None = os.environ.get("KINDLE_EMAIL")
 GOOGLE_API_KEY: str | None = os.environ.get("GOOGLE_API_KEY")
-SCRAPER_PROXY: str | None = os.environ.get("SCRAPER_PROXY") or os.environ.get(
-    "HTTPS_PROXY"
-)
+
+_RAW_PROXY_LIST: str | None = os.environ.get("SCRAPER_PROXY_LIST")
+
+SCRAPER_PROXY_LIST: list[str] = [
+    p.strip() for p in (_RAW_PROXY_LIST or "").split(",") if p.strip()
+]
 
 NYT_SENDERS: list[str] = [
     "nytdirect@nytimes.com",
@@ -366,6 +370,12 @@ def _is_junk_section(text: str) -> bool:
 
 def _validate_config() -> None:
     """Validates required environment variables at startup (fail-fast)."""
+    if os.environ.get("SCRAPER_PROXY") and not os.environ.get("SCRAPER_PROXY_LIST"):
+        logger.warning(
+            "SCRAPER_PROXY is deprecated. Use SCRAPER_PROXY_LIST instead "
+            "(comma-separated list of proxy URLs). "
+            "The old variable will be ignored."
+        )
     missing: list[str] = []
     if not EMAIL_ACCOUNT:
         missing.append("EMAIL_ACCOUNT")
@@ -380,3 +390,34 @@ def _validate_config() -> None:
             f"Missing required environment variable(s): {', '.join(missing)}. "
             "Please check your .env file."
         )
+
+
+class _ProxyRotator:
+    """Encapsulates round-robin proxy rotation over SCRAPER_PROXY_LIST.
+
+    Thread-safe for the call pattern used here (each URL calls _next_proxy once
+    before the request, so no concurrent access to the same cycle).
+    """
+
+    def __init__(self) -> None:
+        self._cycle: itertools.cycle[str] | None = None
+
+    def reset(self) -> None:
+        """Resets the cycle iterator. Use in tests to isolate state."""
+        self._cycle = None
+
+    def get_next(self) -> str | None:
+        """Returns the next proxy from the rotation, or None if list is empty."""
+        if not SCRAPER_PROXY_LIST:
+            return None
+        if self._cycle is None:
+            self._cycle = itertools.cycle(SCRAPER_PROXY_LIST)
+        return next(self._cycle)
+
+
+_proxy_rotator = _ProxyRotator()
+
+
+def _next_proxy() -> str | None:
+    """Returns the next proxy from the rotation, or None if no proxies configured."""
+    return _proxy_rotator.get_next()

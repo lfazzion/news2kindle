@@ -1,7 +1,6 @@
 """Tests for text extraction, HTML parsing, newsletter splitting, and scraping logic."""
 
 import asyncio
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -297,16 +296,18 @@ class TestSplitNewsletterSections:
 
 
 # ===========================================================================
-# _fetch_legacy_sync — CloudScraper fallback (unit-level, mocked)
+# _safe_legacy_fallback — curl_cffi fallback (unit-level, mocked)
 # ===========================================================================
 
 
-class TestFetchLegacySync:
+class TestSafeLegacyFallback:
     def test_returns_empty_on_exception(self, monkeypatch):
-        """Should return ('', url) on any exception from CloudScraper."""
-        mock_scraper = MagicMock()
-        mock_scraper.get.side_effect = ConnectionError("Simulated connection failure")
-        monkeypatch.setattr("core.scraper._get_legacy_scraper", lambda: mock_scraper)
+        """Should return ('', url) on any exception from curl_cffi."""
+        from unittest.mock import AsyncMock
+
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock(side_effect=ConnectionError("Simulated failure"))
+        monkeypatch.setattr("core.scraper._get_async_session", lambda: mock_session)
 
         md, url = asyncio.run(_safe_legacy_fallback("https://example.com/article"))
         assert md == ""

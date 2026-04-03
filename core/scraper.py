@@ -1,11 +1,9 @@
-"""HTTP scraping: curl_cffi AsyncSession primary + CloudScraper fallback."""
+"""HTTP scraping: stealth-requests primary + curl_cffi fallback."""
 
 import asyncio
 import json
 import logging
-import threading as _threading
 
-import cloudscraper
 import markdownify
 import trafilatura
 from curl_cffi.requests import AsyncSession
@@ -17,9 +15,9 @@ from core.config import (
     HTTP_BLOCK_STATUS_CODES,
     MIN_HTML_RESPONSE_LENGTH,
     MIN_JSON_EXTRACT_LENGTH,
-    SCRAPER_PROXY,
     SCRAPER_URL_TIMEOUT,
     _is_blocked_content,
+    _next_proxy,
     _strip_query,
 )
 
@@ -45,23 +43,31 @@ _BROWSER_HEADERS: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Async session singleton
+# Async session singleton (curl_cffi fallback)
 # ---------------------------------------------------------------------------
 
 _async_session: AsyncSession | None = None
 
 
 def _get_async_session() -> AsyncSession:
-    """Returns a lazily-initialised AsyncSession with Chrome TLS impersonation."""
+    """Returns a lazily-initialised AsyncSession with Chrome TLS impersonation.
+
+    Contract: the proxy is selected once at session creation time via
+    _next_proxy(). Subsequent calls return the same cached instance, so the
+    proxy does NOT rotate until _reset_async_session() is called. This is
+    intentional — curl_cffi's AsyncSession reuses connections and changing the
+    proxy mid-session would break the connection pool.
+    """
     global _async_session
     if _async_session is None:
+        proxy = _next_proxy()
         _async_session = AsyncSession(
             impersonate="chrome",
-            proxy=SCRAPER_PROXY,
+            proxy=proxy,
             headers=_BROWSER_HEADERS,
         )
-        if SCRAPER_PROXY:
-            logger.info("Scraper proxy configured: %s…", SCRAPER_PROXY[:30])
+        if proxy:
+            logger.info("Scraper proxy configured: %s…", proxy[:30])
         else:
             logger.info("No scraper proxy configured — using direct datacenter IP.")
     return _async_session
@@ -77,27 +83,6 @@ async def _reset_async_session() -> None:
             await _async_session.close()
     _async_session = None
     _get_async_session()
-
-
-# ---------------------------------------------------------------------------
-# Legacy CloudScraper session
-# ---------------------------------------------------------------------------
-
-_legacy_thread_local = _threading.local()
-
-
-def _get_legacy_scraper() -> cloudscraper.CloudScraper:
-    """Returns a thread-local CloudScraper session (fallback only)."""
-    if not hasattr(_legacy_thread_local, "scraper"):
-        _legacy_thread_local.scraper = cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "windows", "desktop": True}
-        )
-        if SCRAPER_PROXY:
-            _legacy_thread_local.scraper.proxies = {
-                "http": SCRAPER_PROXY,
-                "https": SCRAPER_PROXY,
-            }
-    return _legacy_thread_local.scraper
 
 
 # ---------------------------------------------------------------------------
@@ -230,91 +215,19 @@ def _parse_html_to_markdown(html: str, target_url: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Fallback cascade
+# Primary scraper: stealth-requests (sync, in thread)
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_article_text_async_impl(url: str) -> tuple[str, str]:
-    """Primary scraper: curl_cffi AsyncSession with Chrome TLS impersonation."""
-    session = _get_async_session()
-    try:
-        req = await session.get(url, timeout=SCRAPER_URL_TIMEOUT)
-        resolved_url = _strip_query(req.url)
-        html = req.text
-
-        if any(d in resolved_url for d in _DENY_DOMAINS):
-            logger.debug(
-                "Resolved URL %s is in _DENY_DOMAINS. Skipping.", resolved_url[:80]
-            )
-            return "", resolved_url
-
-        if req.status_code in HTTP_BLOCK_STATUS_CODES:
-            logger.warning(
-                "HTTP %d on %s via curl_cffi. Engaging fallback cascade...",
-                req.status_code,
-                resolved_url,
-            )
-            return await _safe_legacy_fallback(url)
-
-        if len(html) < MIN_HTML_RESPONSE_LENGTH:
-            logger.warning(
-                "curl_cffi response too small (%d bytes) for %s. "
-                "Engaging fallback cascade...",
-                len(html),
-                resolved_url,
-            )
-            return await _safe_legacy_fallback(url)
-
-        md_text, resolved_url = _parse_html_to_markdown(html, resolved_url)
-
-        if not md_text:
-            logger.warning(
-                "curl_cffi parsing failed for %s. Engaging fallback cascade...",
-                resolved_url,
-            )
-            return await _safe_legacy_fallback(url)
-
-        return md_text, resolved_url
-
-    except (TimeoutError, ConnectionError, OSError) as e:
-        logger.warning(
-            "curl_cffi error on %s: %s — trying CloudScraper fallback...", url[:60], e
-        )
-        return await _safe_legacy_fallback(url)
-    except Exception as e:
-        logger.warning(
-            "curl_cffi unexpected error on %s: %s — trying CloudScraper fallback...",
-            url[:60],
-            e,
-        )
-        return await _safe_legacy_fallback(url)
-
-
-async def _safe_legacy_fallback(url: str) -> tuple[str, str]:
-    """Runs fallback cascade: CloudScraper → stealth-requests. Never raises."""
-    try:
-        result = await asyncio.to_thread(_fetch_legacy_sync, url)
-        if result[0]:
-            return result
-    except Exception as e:
-        logger.warning("CloudScraper fallback failed for %s: %s", url[:60], e)
-
-    try:
-        result = await asyncio.to_thread(_fetch_stealth_sync, url)
-        if result[0]:
-            return result
-    except Exception as e:
-        logger.warning("stealth-requests fallback failed for %s: %s", url[:60], e)
-
-    logger.error("All scrapers failed for %s", url[:60])
-    return "", url
-
-
-def _fetch_stealth_sync(url: str) -> tuple[str, str]:
-    """Tertiary fallback: stealth_requests with UA rotation and Referer tracking."""
+def _fetch_stealth_sync(url: str, proxy: str | None = None) -> tuple[str, str]:
+    """Primary scraper: stealth_requests with UA rotation and optional proxy."""
     import stealth_requests as requests
 
-    resp = requests.get(url, timeout=15.0)
+    kwargs: dict = {"timeout": SCRAPER_URL_TIMEOUT}
+    if proxy:
+        kwargs["proxies"] = {"https": proxy, "http": proxy}
+
+    resp = requests.get(url, **kwargs)
     resolved_url = _strip_query(resp.url)
     html = resp.text
 
@@ -336,46 +249,80 @@ def _fetch_stealth_sync(url: str) -> tuple[str, str]:
     return md_text, resolved_url
 
 
-def _fetch_legacy_sync(url: str) -> tuple[str, str]:
-    """Legacy CloudScraper fallback. Used only when curl_cffi fails or is blocked."""
-    scraper = _get_legacy_scraper()
-    req = scraper.get(url, timeout=(4.0, 15.0))
-    resolved_url = _strip_query(req.url)
-    html = req.text
+# ---------------------------------------------------------------------------
+# Fallback: curl_cffi async
+# ---------------------------------------------------------------------------
 
-    if any(d in resolved_url for d in _DENY_DOMAINS):
-        logger.debug(
-            "Legacy: resolved URL %s is in _DENY_DOMAINS. Skipping.", resolved_url[:80]
+
+async def _safe_legacy_fallback(url: str) -> tuple[str, str]:
+    """Fallback: curl_cffi AsyncSession. Never raises."""
+    session = _get_async_session()
+    try:
+        req = await session.get(url, timeout=SCRAPER_URL_TIMEOUT)
+        resolved_url = _strip_query(req.url)
+        html = req.text
+
+        if any(d in resolved_url for d in _DENY_DOMAINS):
+            return "", resolved_url
+
+        if req.status_code in HTTP_BLOCK_STATUS_CODES:
+            logger.warning(
+                "curl_cffi fallback got HTTP %d for %s",
+                req.status_code,
+                resolved_url,
+            )
+            return "", resolved_url
+
+        if len(html) < MIN_HTML_RESPONSE_LENGTH:
+            logger.warning("curl_cffi fallback response too small for %s", resolved_url)
+            return "", resolved_url
+
+        md_text, resolved_url = _parse_html_to_markdown(html, resolved_url)
+        if not md_text:
+            return "", resolved_url
+
+        logger.info("curl_cffi fallback succeeded for %s", url[:60])
+        return md_text, resolved_url
+    except Exception as e:
+        logger.warning("curl_cffi fallback failed for %s: %s", url[:60], e)
+        return "", url
+
+
+# ---------------------------------------------------------------------------
+# Main cascade: stealth-requests → curl_cffi
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_article_text_async_impl(url: str) -> tuple[str, str]:
+    """Primary: stealth-requests (sync, in thread) with curl_cffi fallback."""
+    proxy = _next_proxy()
+
+    # Step 1: stealth-requests (primary, sync in thread)
+    try:
+        result = await asyncio.to_thread(_fetch_stealth_sync, url, proxy)
+        if result[0]:
+            return result
+    except Exception as e:
+        logger.warning(
+            "stealth-requests error on %s: %s — trying curl_cffi fallback...",
+            url[:60],
+            e,
         )
-        return "", resolved_url
 
-    if req.status_code in HTTP_BLOCK_STATUS_CODES:
-        logger.error(
-            "CloudScraper also got HTTP %d for %s", req.status_code, resolved_url
-        )
-        return "", resolved_url
+    # Step 2: curl_cffi (fallback, async)
+    return await _safe_legacy_fallback(url)
 
-    if len(html) < MIN_HTML_RESPONSE_LENGTH:
-        logger.error(
-            "CloudScraper response too small (%d bytes) for %s", len(html), resolved_url
-        )
-        return "", resolved_url
 
-    md_text, resolved_url = _parse_html_to_markdown(html, resolved_url)
-
-    if not md_text:
-        logger.error("CloudScraper also failed to extract content for %s", resolved_url)
-        return "", resolved_url
-
-    logger.info("CloudScraper fallback succeeded for %s", url[:60])
-    return md_text, resolved_url
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 async def fetch_article_text_async(
     url: str,
     semaphore: asyncio.Semaphore,
 ) -> tuple[str, str] | None:
-    """Fetches an article URL using curl_cffi (primary) with CloudScraper fallback.
+    """Fetches an article URL using stealth-requests (primary) with curl_cffi fallback.
 
     Enforces a per-URL timeout (SCRAPER_URL_TIMEOUT) to prevent a single slow
     URL from holding a semaphore slot indefinitely.

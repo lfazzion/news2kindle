@@ -4,7 +4,9 @@ import asyncio
 import datetime
 import json
 import logging
+import math
 import os
+import random
 from dataclasses import asdict
 
 from google.genai import errors as genai_errors
@@ -20,7 +22,6 @@ from core.config import (
     LEVEL_PRIORITY,
     MAX_TOKENS_PER_CHUNK,
     ROUTER_MODEL,
-    SCRAPER_BATCH_DELAY,
     SCRAPER_CONCURRENCY,
     SCRAPER_RETRY_DELAY,
     SHORT_NOTES_MODEL,
@@ -429,6 +430,22 @@ async def summarize_text(enriched_news: list[EnrichedNews]) -> str | None:
     return "\n".join(html_parts)
 
 
+def _burst_delays(
+    num_urls: int,
+    burst_size: int = SCRAPER_CONCURRENCY,
+    min_pause: float = 5.0,
+    max_pause: float = 12.0,
+) -> list[float]:
+    """Generate inter-burst delays with jitter (uniform random).
+
+    Returns a list of delays, one per burst boundary
+    (len = ceil(num_urls/burst_size) - 1). The last burst has no delay after it.
+    """
+    num_bursts = math.ceil(num_urls / burst_size)
+    num_delays = max(num_bursts - 1, 0)
+    return [random.uniform(min_pause, max_pause) for _ in range(num_delays)]
+
+
 async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
     """Downloads emails, converts to Markdown, and builds a local document cache."""
     try:
@@ -462,15 +479,16 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
         global_urls_to_fetch = deduped_urls
 
         logger.info(
-            "Fetching %d external NYT links in batches of %d "
-            "(delay: %.1fs between batches)...",
+            "Fetching %d external links in bursts of %d (jittered pause: 5-12s)...",
             len(global_urls_to_fetch),
             SCRAPER_CONCURRENCY,
-            SCRAPER_BATCH_DELAY,
         )
         semaphore = asyncio.Semaphore(SCRAPER_CONCURRENCY)
         all_results: list[tuple[str, str] | None] = []
         failed_urls: list[str] = []
+
+        delays = _burst_delays(len(global_urls_to_fetch))
+        delay_iter = iter(delays)
 
         for i in range(0, len(global_urls_to_fetch), SCRAPER_CONCURRENCY):
             batch = global_urls_to_fetch[i : i + SCRAPER_CONCURRENCY]
@@ -481,8 +499,10 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
                 all_results.append(result)
                 if result is None or not result[0]:
                     failed_urls.append(url)
-            if i + SCRAPER_CONCURRENCY < len(global_urls_to_fetch):
-                await asyncio.sleep(SCRAPER_BATCH_DELAY)
+            delay = next(delay_iter, None)
+            if delay is not None:
+                logger.info("Burst complete. Pausing %.1fs before next burst...", delay)
+                await asyncio.sleep(delay)
 
         retry_candidates = failed_urls
         retry_still_failed: list[str] = []
@@ -495,6 +515,8 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
             )
             await asyncio.sleep(SCRAPER_RETRY_DELAY)
             await _reset_async_session()
+            retry_delays = _burst_delays(len(retry_candidates))
+            retry_delay_iter = iter(retry_delays)
             for j in range(0, len(retry_candidates), SCRAPER_CONCURRENCY):
                 retry_batch = retry_candidates[j : j + SCRAPER_CONCURRENCY]
                 retry_batch_results = await asyncio.gather(
@@ -505,8 +527,9 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
                         all_results.append(result)
                     else:
                         retry_still_failed.append(url)
-                if j + SCRAPER_CONCURRENCY < len(retry_candidates):
-                    await asyncio.sleep(SCRAPER_BATCH_DELAY)
+                delay = next(retry_delay_iter, None)
+                if delay is not None:
+                    await asyncio.sleep(delay)
             for u in retry_still_failed:
                 _FAILED_URLS_CACHE.add(_strip_query(u))
             if retry_still_failed:

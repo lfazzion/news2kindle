@@ -1,10 +1,12 @@
 """Google GenAI integration with retry and rate limiting."""
 
+import asyncio
 import logging
 
 from aiolimiter import AsyncLimiter
 from google import genai
 from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -65,7 +67,10 @@ def _get_genai_client() -> genai.Client | None:
         logger.error("GOOGLE_API_KEY not set.")
         return None
     _init_limiters()
-    _genai_client = genai.Client(api_key=GOOGLE_API_KEY)
+    _genai_client = genai.Client(
+        api_key=GOOGLE_API_KEY,
+        http_options=genai_types.HttpOptions(timeout=15000),
+    )
     return _genai_client
 
 
@@ -98,10 +103,11 @@ async def _generate_content_retry(
     model: str,
 ) -> genai.types.GenerateContentResponse:
     """Internal retry block. It will fail after 5 attempts."""
-    return await client.aio.models.generate_content(
-        model=model,
-        contents=prompt,
-    )
+    async with asyncio.timeout(15.0):
+        return await client.aio.models.generate_content(
+            model=model,
+            contents=prompt,
+        )
 
 
 async def _generate_content_async(

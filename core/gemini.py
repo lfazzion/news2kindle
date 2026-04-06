@@ -69,7 +69,7 @@ def _get_genai_client() -> genai.Client | None:
     _init_limiters()
     _genai_client = genai.Client(
         api_key=GOOGLE_API_KEY,
-        http_options=genai_types.HttpOptions(timeout=15000),
+        http_options=genai_types.HttpOptions(timeout=90000),
     )
     return _genai_client
 
@@ -103,7 +103,7 @@ async def _generate_content_retry(
     model: str,
 ) -> genai.types.GenerateContentResponse:
     """Internal retry block. It will fail after 5 attempts."""
-    async with asyncio.timeout(15.0):
+    async with asyncio.timeout(90.0):
         return await client.aio.models.generate_content(
             model=model,
             contents=prompt,

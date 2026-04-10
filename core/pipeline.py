@@ -39,6 +39,33 @@ from core.scraper import _reset_async_session, fetch_article_text_async
 
 logger = logging.getLogger(__name__)
 
+_VALID_LEVELS: frozenset[str] = frozenset({"principal", "secundaria", "notas_curtas"})
+
+
+def _validate_grouped_item(item: dict, idx: int) -> bool:
+    """Valida e corrige in-place um item de grouped_news retornado pelo LLM.
+
+    Retorna False se o item deve ser descartado.
+    """
+    title = item.get("title")
+    level = item.get("level")
+    cache_ids = item.get("cache_ids")
+
+    if not isinstance(title, str) or not title.strip():
+        logger.warning("Grouped item %d: 'title' inválido ou ausente: %r", idx, title)
+        return False
+    if level not in _VALID_LEVELS:
+        logger.warning(
+            "Grouped item %d: 'level' inválido %r, rebaixando para 'secundaria'.",
+            idx,
+            level,
+        )
+        item["level"] = "secundaria"
+    if not isinstance(cache_ids, list) or not cache_ids:
+        logger.warning("Grouped item %d: 'cache_ids' inválido: %r", idx, cache_ids)
+        return False
+    return True
+
 
 async def categorize_news(cache_global: list[CacheDocument]) -> dict | None:
     """Sends the cache to Flash-Lite to group document IDs into news categories."""
@@ -99,7 +126,12 @@ async def categorize_news(cache_global: list[CacheDocument]) -> dict | None:
                 )
                 continue
 
-            all_grouped_news.extend(data["grouped_news"])
+            validated = [
+                g
+                for i, g in enumerate(data["grouped_news"])
+                if _validate_grouped_item(g, i)
+            ]
+            all_grouped_news.extend(validated)
 
         if not all_grouped_news:
             return None
@@ -440,6 +472,10 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
 
     doc_counter = len(cache_global)
 
+    deduped_urls: list[str] = []
+    retry_candidates: list[str] = []
+    retry_still_failed: list[str] = []
+
     if global_urls_to_fetch:
         deduped_urls: list[str] = []
         _seen_base: set[str] = set()
@@ -550,9 +586,9 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
         sum(1 for d in cache_global if d.source == "link_externo"),
     )
     if global_urls_to_fetch:
-        total_queued = len(deduped_urls)  # type: ignore[possibly-unbound]
+        total_queued = len(deduped_urls)
         total_success = sum(1 for d in cache_global if d.source == "link_externo")
-        total_failed = len(retry_still_failed) if retry_candidates else 0  # type: ignore[possibly-unbound]
+        total_failed = len(retry_still_failed) if retry_candidates else 0
         logger.info(
             "Scraping summary: %d queued → %d succeeded, %d failed.",
             total_queued,
@@ -669,19 +705,24 @@ async def process_newsletters() -> None:
     logger.info("Summary generated. Sending to Kindle…")
     today_str = datetime.date.today().strftime("%Y/%m/%d")
 
-    if not await send_to_kindle(summary, today_str):
+    kindle_sent = await send_to_kindle(summary, today_str)
+    if not kindle_sent:
+        logger.error("Failed to send to Kindle.")
+
+    try:
+        if kindle_sent and emails_to_delete:
+            await cleanup_emails(emails_to_delete)
+    finally:
+        for cache_path in (CACHE_FILE, CACHE_UIDS_FILE):
+            if os.path.exists(cache_path):
+                try:
+                    os.remove(cache_path)
+                except Exception as e:
+                    logger.warning("Failed to remove cache file %s: %s", cache_path, e)
+        logger.info("Local failover cache files purged.")
+
+    if not kindle_sent:
         return
-
-    if emails_to_delete:
-        await cleanup_emails(emails_to_delete)
-
-    for cache_path in (CACHE_FILE, CACHE_UIDS_FILE):
-        if os.path.exists(cache_path):
-            try:
-                os.remove(cache_path)
-            except Exception as e:
-                logger.warning("Failed to remove cache file %s: %s", cache_path, e)
-    logger.info("Local failover cache files purged.")
 
     metrics["total_s"] = round(time.monotonic() - t_total, 1)
     metrics["docs"] = len(cache_global)

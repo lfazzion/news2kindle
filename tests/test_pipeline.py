@@ -10,7 +10,12 @@ from core.config import (
     CacheDocument,
     EnrichedNews,
 )
-from core.pipeline import categorize_news, match_cache_to_groups, summarize_text
+from core.pipeline import (
+    _validate_grouped_item,
+    categorize_news,
+    match_cache_to_groups,
+    summarize_text,
+)
 
 # ===========================================================================
 # match_cache_to_groups (Phase 2.5 — pure Python, no API)
@@ -318,3 +323,41 @@ class TestSummarizeText:
         result = await summarize_text(news)
         assert result is not None
         assert "Retry succeeded" in result
+
+
+# ===========================================================================
+# _validate_grouped_item (CS-05 — pure Python, no API)
+# ===========================================================================
+
+
+class TestValidateGroupedItem:
+    def test_valid_item_passes(self):
+        item = {"title": "Título OK", "level": "principal", "cache_ids": ["doc_1"]}
+        assert _validate_grouped_item(item, 0) is True
+
+    def test_invalid_level_corrected_to_secundaria(self):
+        item = {"title": "T", "level": "tertiary", "cache_ids": ["doc_1"]}
+        assert _validate_grouped_item(item, 0) is True
+        assert item["level"] == "secundaria"
+
+    def test_missing_title_returns_false(self):
+        item = {"title": "", "level": "principal", "cache_ids": ["doc_1"]}
+        assert _validate_grouped_item(item, 0) is False
+
+    def test_none_title_returns_false(self):
+        item = {"title": None, "level": "principal", "cache_ids": ["doc_1"]}
+        assert _validate_grouped_item(item, 0) is False
+
+    def test_empty_cache_ids_returns_false(self):
+        item = {"title": "T", "level": "secundaria", "cache_ids": []}
+        assert _validate_grouped_item(item, 0) is False
+
+    def test_none_cache_ids_returns_false(self):
+        item = {"title": "T", "level": "secundaria", "cache_ids": None}
+        assert _validate_grouped_item(item, 0) is False
+
+    def test_valid_levels_all_pass(self):
+        for level in ("principal", "secundaria", "notas_curtas"):
+            item = {"title": "T", "level": level, "cache_ids": ["doc_1"]}
+            assert _validate_grouped_item(item, 0) is True
+            assert item["level"] == level  # not modified

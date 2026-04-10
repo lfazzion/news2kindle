@@ -337,9 +337,11 @@ def _strip_query(url: str) -> str:
 
 
 def _extract_clean_response(text: str) -> str:
-    """Strips optional markdown code fences from an LLM response."""
-    match = _CODE_FENCE_RE.search(text)
-    return match.group(1).strip() if match else text.strip()
+    """Extrai conteúdo de code fences; concatena múltiplos blocos se houver."""
+    matches = _CODE_FENCE_RE.findall(text)
+    if matches:
+        return "\n".join(m.strip() for m in matches)
+    return text.strip()
 
 
 def _is_admin_text(text: str, admin_keywords: set[str] | frozenset[str]) -> bool:

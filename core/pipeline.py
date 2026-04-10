@@ -9,6 +9,7 @@ import os
 import random
 import time
 from dataclasses import asdict
+from html import escape
 
 from google.genai import errors as genai_errors
 
@@ -389,7 +390,8 @@ async def summarize_text(enriched_news: list[EnrichedNews]) -> str | None:
             toc_parts.append("<ul class='indice-lista'>")
             for item in grupos[nivel_esperado]:
                 toc_parts.append(
-                    f"<li><a href='#{item.anchor_id}'>&bull; {item.title}</a></li>"
+                    f"<li><a href='#{item.anchor_id}'>"
+                    f"&bull; {escape(item.title)}</a></li>"
                 )
             toc_parts.append("</ul>")
     html_parts.extend(toc_parts)

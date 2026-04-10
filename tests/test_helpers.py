@@ -133,6 +133,16 @@ class TestExtractCleanResponse:
         result = _extract_clean_response(raw)
         assert "code" in result
 
+    def test_multiple_code_fences_concatenated(self):
+        raw = '```json\n{"a": 1}\n```\n```json\n{"b": 2}\n```'
+        result = _extract_clean_response(raw)
+        assert '{"a": 1}' in result
+        assert '{"b": 2}' in result
+
+    def test_no_code_fence_returns_stripped(self):
+        raw = "  Some text without fences  "
+        assert _extract_clean_response(raw) == "Some text without fences"
+
 
 class TestIsAdminText:
     def test_matches_keyword(self):

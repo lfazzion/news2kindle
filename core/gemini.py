@@ -117,7 +117,10 @@ async def _generate_content_async(
 ) -> genai.types.GenerateContentResponse:
     """Calls Gemini with automatic retry, token counting, and rate limiting."""
     _init_limiters()
-    assert MODEL_RPM_LIMITERS is not None and MODEL_TPM_LIMITERS is not None
+    if MODEL_RPM_LIMITERS is None or MODEL_TPM_LIMITERS is None:
+        raise RuntimeError(
+            "Rate limiters not initialized. Call _init_limiters() first."
+        )
 
     rpm_limiter = MODEL_RPM_LIMITERS.get(model, MODEL_RPM_LIMITERS[GENERATOR_MODEL])
     tpm_limiter = MODEL_TPM_LIMITERS.get(model)

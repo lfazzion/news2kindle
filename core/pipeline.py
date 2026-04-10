@@ -31,6 +31,7 @@ from core.config import (
     EnrichedNews,
     _extract_clean_response,
     _strip_query,
+    sanitize_html_for_kindle,
 )
 from core.email_client import _fetch_emails_sync, cleanup_emails, send_to_kindle
 from core.gemini import _generate_content_async, _get_genai_client, _local_count_tokens
@@ -340,7 +341,8 @@ async def summarize_text(enriched_news: list[EnrichedNews]) -> str | None:
                 HTML_TRANSLATE_PROMPT.format(level=nivel, content=conteudo_junto),
                 model=model_to_use,
             )
-            return _extract_clean_response(response.text or "")
+            raw_html = _extract_clean_response(response.text or "")
+            return sanitize_html_for_kindle(raw_html)
 
         logger.warning(
             "Bandeja '%s' exigiria %d tokens, o que excede o "
@@ -360,7 +362,8 @@ async def summarize_text(enriched_news: list[EnrichedNews]) -> str | None:
                 HTML_TRANSLATE_PROMPT.format(level=nivel, content=conteudo_junto),
                 model=model_to_use,
             )
-            return _extract_clean_response(response.text or "")
+            raw_html = _extract_clean_response(response.text or "")
+            return sanitize_html_for_kindle(raw_html)
 
         mid = len(lista_noticias) // 2
         esquerda = lista_noticias[:mid]

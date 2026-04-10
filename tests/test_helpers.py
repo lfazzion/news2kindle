@@ -27,6 +27,7 @@ from core.config import (
     _parse_smtp_port,
     _strip_query,
     _validate_config,
+    sanitize_html_for_kindle,
 )
 
 # ===========================================================================
@@ -353,6 +354,43 @@ class TestBoundedSet:
     def test_discard_missing_item_no_error(self):
         s = BoundedSet(maxsize=5)
         s.discard("nonexistent")  # should not raise
+
+
+class TestSanitizeHtmlForKindle:
+    def test_allows_basic_tags(self):
+        html = "<p>Hello <strong>world</strong></p>"
+        result = sanitize_html_for_kindle(html)
+        assert "<p>" in result
+        assert "<strong>" in result
+
+    def test_strips_script_tags(self):
+        html = "<p>Text</p><script>alert('xss')</script>"
+        result = sanitize_html_for_kindle(html)
+        assert "<script>" not in result
+        assert "alert" not in result
+
+    def test_strips_style_tags(self):
+        html = "<p>Text</p><style>body{color:red}</style>"
+        result = sanitize_html_for_kindle(html)
+        assert "<style>" not in result
+
+    def test_strips_html_comments(self):
+        html = "<!-- comment --><p>Text</p>"
+        result = sanitize_html_for_kindle(html)
+        assert "<!--" not in result
+
+    def test_preserves_anchor_href(self):
+        html = "<a href='#noticia-1'>Link</a>"
+        result = sanitize_html_for_kindle(html)
+        assert "href=" in result
+
+    def test_strips_onclick_attr(self):
+        html = "<p onclick='evil()'>Text</p>"
+        result = sanitize_html_for_kindle(html)
+        assert "onclick" not in result
+
+    def test_empty_string(self):
+        assert sanitize_html_for_kindle("") == ""
 
 
 class TestExtractPreloadedJson:

@@ -8,6 +8,7 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass
 
+import nh3
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -364,6 +365,64 @@ _MARKDOWNIFY_TAGS: list[str] = [
     "figure",
     "figcaption",
 ]
+
+# ---------------------------------------------------------------------------
+# HTML sanitization
+# ---------------------------------------------------------------------------
+
+_KINDLE_ALLOWED_TAGS: frozenset[str] = frozenset(
+    {
+        "p",
+        "br",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "b",
+        "strong",
+        "i",
+        "em",
+        "u",
+        "blockquote",
+        "ul",
+        "ol",
+        "li",
+        "a",
+        "img",
+        "hr",
+        "span",
+        "div",
+        "table",
+        "tr",
+        "td",
+        "th",
+        "thead",
+        "tbody",
+    }
+)
+
+_KINDLE_ALLOWED_ATTRS: dict[str, set[str]] = {
+    "a": {"href", "id", "name"},
+    "img": {"src", "alt"},
+    "div": {"class"},
+    "h1": {"id"},
+    "h2": {"id"},
+    "h3": {"id", "class"},
+    "span": {"class"},
+}
+
+
+def sanitize_html_for_kindle(html: str) -> str:
+    """Sanitiza HTML gerado pelo LLM, mantendo apenas tags seguras para Kindle."""
+    return nh3.clean(
+        html,
+        tags=_KINDLE_ALLOWED_TAGS,
+        attributes=_KINDLE_ALLOWED_ATTRS,
+        strip_comments=True,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Helpers

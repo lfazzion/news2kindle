@@ -249,7 +249,7 @@ def match_cache_to_groups(
                 EnrichedNews(
                     title=title,
                     level=level,
-                    content="\n\n---\n\n".join(texts),
+                    content=sanitize_untrusted_content("\n\n---\n\n".join(texts)),
                 )
             )
 

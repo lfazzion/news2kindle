@@ -295,8 +295,8 @@ async def _safe_legacy_fallback(
         return md_text, resolved_url
     except Exception as e:
         safe_msg = str(e)
-        for proxy in SCRAPER_PROXY_LIST:
-            safe_msg = safe_msg.replace(proxy, _mask_proxy_url(proxy))
+        for known_proxy in SCRAPER_PROXY_LIST:
+            safe_msg = safe_msg.replace(known_proxy, _mask_proxy_url(known_proxy))
         logger.warning("curl_cffi fallback failed for %s: %s", url[:60], safe_msg)
         return "", url
 

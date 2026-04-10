@@ -128,8 +128,8 @@ async def categorize_news(cache_global: list[CacheDocument]) -> dict | None:
 
             validated = [
                 g
-                for i, g in enumerate(data["grouped_news"])
-                if _validate_grouped_item(g, i)
+                for item_idx, g in enumerate(data["grouped_news"])
+                if _validate_grouped_item(g, item_idx)
             ]
             all_grouped_news.extend(validated)
 
@@ -477,7 +477,6 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
     retry_still_failed: list[str] = []
 
     if global_urls_to_fetch:
-        deduped_urls: list[str] = []
         _seen_base: set[str] = set()
         for u in global_urls_to_fetch:
             base = _strip_query(u)

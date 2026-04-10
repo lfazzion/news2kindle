@@ -20,6 +20,7 @@ from core.config import (
     CacheDocument,
     EnrichedNews,
     _extract_clean_response,
+    _extract_preloaded_json,
     _is_admin_text,
     _is_blocked_content,
     _is_junk_section,
@@ -352,3 +353,36 @@ class TestBoundedSet:
     def test_discard_missing_item_no_error(self):
         s = BoundedSet(maxsize=5)
         s.discard("nonexistent")  # should not raise
+
+
+class TestExtractPreloadedJson:
+    def test_parses_preloaded_data(self):
+        html = 'window.__preloadedData={"key": "value", "num": 42};'
+        result = _extract_preloaded_json(html)
+        assert result == {"key": "value", "num": 42}
+
+    def test_parses_next_data(self):
+        html = 'window.__NEXT_DATA__={"props": {"pageProps": {}}};'
+        result = _extract_preloaded_json(html)
+        assert result is not None
+        assert "props" in result
+
+    def test_parses_preloaded_state(self):
+        html = 'window.__PRELOADED_STATE__={"store": {"items": [1, 2]}};'
+        result = _extract_preloaded_json(html)
+        assert result is not None
+        assert result["store"]["items"] == [1, 2]
+
+    def test_returns_none_when_no_prefix(self):
+        html = "<html><body>No JSON here</body></html>"
+        assert _extract_preloaded_json(html) is None
+
+    def test_handles_malformed_json_gracefully(self):
+        html = "window.__preloadedData={not: valid json};"
+        result = _extract_preloaded_json(html)
+        assert result is None  # malformed JSON returns None, not raises
+
+    def test_handles_nested_objects(self):
+        html = 'window.__preloadedData={"a": {"b": {"c": 1}}};'
+        result = _extract_preloaded_json(html)
+        assert result["a"]["b"]["c"] == 1

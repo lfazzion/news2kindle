@@ -377,15 +377,20 @@ def _extract_preloaded_json(html: str) -> dict | None:
     import json as _json
 
     prefixes = (
-        "window.__preloadedData=",
-        "window.__NEXT_DATA__=",
-        "window.__PRELOADED_STATE__=",
+        "window.__preloadedData",
+        "window.__NEXT_DATA__",
+        "window.__PRELOADED_STATE__",
     )
     for prefix in prefixes:
         idx = html.find(prefix)
         if idx == -1:
             continue
-        brace_start = html.find("{", idx)
+        # Verify there is an '=' between the prefix and the opening brace
+        # (handles both `=` and ` = ` forms while rejecting unrelated vars).
+        after_prefix = html[idx + len(prefix) : idx + len(prefix) + 10].lstrip()
+        if not after_prefix.startswith("="):
+            continue
+        brace_start = html.find("{", idx + len(prefix))
         if brace_start == -1:
             continue
         depth, i = 0, brace_start

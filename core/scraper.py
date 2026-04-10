@@ -1,7 +1,6 @@
 """HTTP scraping: stealth-requests primary + curl_cffi fallback."""
 
 import asyncio
-import json
 import logging
 
 import markdownify
@@ -11,11 +10,11 @@ from curl_cffi.requests import AsyncSession
 from core.config import (
     _DENY_DOMAINS,
     _MARKDOWNIFY_TAGS,
-    _PRELOADED_JSON_RE,
     HTTP_BLOCK_STATUS_CODES,
     MIN_HTML_RESPONSE_LENGTH,
     MIN_JSON_EXTRACT_LENGTH,
     SCRAPER_URL_TIMEOUT,
+    _extract_preloaded_json,
     _is_blocked_content,
     _next_proxy,
     _strip_query,
@@ -120,41 +119,33 @@ def _parse_html_to_markdown(html: str, target_url: str) -> tuple[str, str]:
     4. trafilatura metadata fallback (title + og:description)
     """
     # 1. Try extracting from JS state variables
-    match = _PRELOADED_JSON_RE.search(html)
-    if match:
-        try:
-            data = json.loads(match.group(1))
-            texts: list[str] = []
-            stack: list[dict | list] = [data]
-            while stack:
-                current = stack.pop()
-                if isinstance(current, dict):
-                    for k, v in current.items():
-                        if (
-                            k == "text"
-                            and isinstance(v, str)
-                            and len(v) > 50
-                            and "<" not in v
-                        ):
-                            texts.append(v)
-                        elif isinstance(v, (dict, list)):
-                            stack.append(v)
-                elif isinstance(current, list):
-                    stack.extend(
-                        item for item in current if isinstance(item, (dict, list))
-                    )
+    data = _extract_preloaded_json(html)
+    if data is not None:
+        texts: list[str] = []
+        stack: list[dict | list] = [data]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                for k, v in current.items():
+                    if (
+                        k == "text"
+                        and isinstance(v, str)
+                        and len(v) > 50
+                        and "<" not in v
+                    ):
+                        texts.append(v)
+                    elif isinstance(v, (dict, list)):
+                        stack.append(v)
+            elif isinstance(current, list):
+                stack.extend(item for item in current if isinstance(item, (dict, list)))
 
-            text = "\n".join(texts)
-            if len(text) > MIN_JSON_EXTRACT_LENGTH:
-                if _is_blocked_content(text):
-                    logger.debug("Bypass hit anti-bot/error wall via JSON.")
-                    return "", target_url
-                logger.debug("Paywall bypass via JSON succeeded (%d chars).", len(text))
-                return text, target_url
-        except json.JSONDecodeError:
-            logger.debug(
-                "Failed to parse preloadedData JSON; falling back to HTML parsing."
-            )
+        text = "\n".join(texts)
+        if len(text) > MIN_JSON_EXTRACT_LENGTH:
+            if _is_blocked_content(text):
+                logger.debug("Bypass hit anti-bot/error wall via JSON.")
+                return "", target_url
+            logger.debug("Paywall bypass via JSON succeeded (%d chars).", len(text))
+            return text, target_url
     else:
         logger.debug(
             "No preloaded JS data found "

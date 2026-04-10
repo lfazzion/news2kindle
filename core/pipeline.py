@@ -32,10 +32,16 @@ from core.config import (
     _extract_clean_response,
     _strip_query,
     sanitize_html_for_kindle,
+    sanitize_untrusted_content,
 )
 from core.email_client import _fetch_emails_sync, cleanup_emails, send_to_kindle
 from core.gemini import _generate_content_async, _get_genai_client, _local_count_tokens
-from core.prompts import HTML_TRANSLATE_PROMPT, JSON_CATEGORIZE_PROMPT
+from core.prompts import (
+    CATEGORIZE_SYSTEM_INSTRUCTION,
+    HTML_TRANSLATE_PROMPT,
+    JSON_CATEGORIZE_PROMPT,
+    TRANSLATE_SYSTEM_INSTRUCTION,
+)
 from core.scraper import _reset_async_session, fetch_article_text_async
 
 logger = logging.getLogger(__name__)
@@ -84,7 +90,8 @@ async def categorize_news(cache_global: list[CacheDocument]) -> dict | None:
         len(cache_global),
     )
     items_for_prompt = [
-        get_item_tokens({"id": doc.id, "text": doc.text}) for doc in cache_global
+        get_item_tokens({"id": doc.id, "text": sanitize_untrusted_content(doc.text)})
+        for doc in cache_global
     ]
 
     chunks_json_str: list[str] = []
@@ -116,6 +123,7 @@ async def categorize_news(cache_global: list[CacheDocument]) -> dict | None:
                 client,
                 JSON_CATEGORIZE_PROMPT.format(text=chunk_str),
                 model=ROUTER_MODEL,
+                system_instruction=CATEGORIZE_SYSTEM_INSTRUCTION,
             )
             json_str = _extract_clean_response(response.text or "")
             data = json.loads(json_str)
@@ -340,6 +348,7 @@ async def summarize_text(enriched_news: list[EnrichedNews]) -> str | None:
                 client,
                 HTML_TRANSLATE_PROMPT.format(level=nivel, content=conteudo_junto),
                 model=model_to_use,
+                system_instruction=TRANSLATE_SYSTEM_INSTRUCTION,
             )
             raw_html = _extract_clean_response(response.text or "")
             return sanitize_html_for_kindle(raw_html)
@@ -361,6 +370,7 @@ async def summarize_text(enriched_news: list[EnrichedNews]) -> str | None:
                 client,
                 HTML_TRANSLATE_PROMPT.format(level=nivel, content=conteudo_junto),
                 model=model_to_use,
+                system_instruction=TRANSLATE_SYSTEM_INSTRUCTION,
             )
             raw_html = _extract_clean_response(response.text or "")
             return sanitize_html_for_kindle(raw_html)

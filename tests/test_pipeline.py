@@ -176,7 +176,7 @@ class TestCategorizeNews:
 
         call_count = 0
 
-        async def mock_generate(client, prompt, model=None):
+        async def mock_generate(client, prompt, model=None, **kwargs):
             nonlocal call_count
             call_count += 1
             response = MagicMock()

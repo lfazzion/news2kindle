@@ -309,6 +309,18 @@ _JUNK_GAMES_KEYWORDS: frozenset[str] = frozenset(
 # Regex patterns
 # ---------------------------------------------------------------------------
 
+_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"ignore\s+(all\s+)?previous\s+instructions?", re.IGNORECASE),
+    re.compile(r"you\s+are\s+now\s+(in\s+)?developer\s+mode", re.IGNORECASE),
+    re.compile(r"system\s*prompt\s*[:=]", re.IGNORECASE),
+    re.compile(r"new\s+instructions?\s*:", re.IGNORECASE),
+)
+
+_INJECTION_TAGS_RE: re.Pattern[str] = re.compile(
+    r"</?(?:system|instruction|task|reminder)\b[^>]*>",
+    re.IGNORECASE,
+)
+
 _NOISE_PHRASE_RE = re.compile(
     r"(?:unsubscribe|view in browser|manage preferences"
     r"|copyright ©|all rights reserved|privacy policy"
@@ -422,6 +434,14 @@ def sanitize_html_for_kindle(html: str) -> str:
         attributes=_KINDLE_ALLOWED_ATTRS,
         strip_comments=True,
     )
+
+
+def sanitize_untrusted_content(text: str) -> str:
+    """Remove padrões comuns de prompt injection de conteúdo raspado da web."""
+    sanitized = _INJECTION_TAGS_RE.sub("", text)
+    for pattern in _INJECTION_PATTERNS:
+        sanitized = pattern.sub("[FILTERED]", sanitized)
+    return sanitized
 
 
 # ---------------------------------------------------------------------------

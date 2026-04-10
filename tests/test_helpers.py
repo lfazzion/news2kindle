@@ -16,12 +16,14 @@ from core.config import (
     _TABLE_TAG_RE,
     LEVEL_ORDER,
     LEVEL_PRIORITY,
+    BoundedSet,
     CacheDocument,
     EnrichedNews,
     _extract_clean_response,
     _is_admin_text,
     _is_blocked_content,
     _is_junk_section,
+    _parse_smtp_port,
     _strip_query,
     _validate_config,
 )
@@ -291,3 +293,62 @@ class TestRegexPatterns:
         match = _PRELOADED_JSON_RE.search(html)
         assert match
         assert '"key"' in match.group(1)
+
+
+class TestParseSMTPPort:
+    def test_valid_port(self, monkeypatch):
+        monkeypatch.setenv("SMTP_PORT", "465")
+        assert _parse_smtp_port() == 465
+
+    def test_default_is_465(self, monkeypatch):
+        monkeypatch.delenv("SMTP_PORT", raising=False)
+        assert _parse_smtp_port() == 465
+
+    def test_invalid_string_raises_valueerror(self, monkeypatch):
+        monkeypatch.setenv("SMTP_PORT", "587abc")
+        with pytest.raises(ValueError, match="must be a valid integer"):
+            _parse_smtp_port()
+
+    def test_out_of_range_raises_valueerror(self, monkeypatch):
+        monkeypatch.setenv("SMTP_PORT", "99999")
+        with pytest.raises(ValueError, match="must be between 1 and 65535"):
+            _parse_smtp_port()
+
+
+class TestBoundedSet:
+    def test_add_and_contains(self):
+        s = BoundedSet(maxsize=3)
+        s.add("a")
+        assert "a" in s
+        assert "b" not in s
+
+    def test_evicts_oldest_when_full(self):
+        s = BoundedSet(maxsize=2)
+        s.add("a")
+        s.add("b")
+        s.add("c")  # "a" deve ser removido
+        assert "a" not in s
+        assert "b" in s
+        assert "c" in s
+
+    def test_len(self):
+        s = BoundedSet(maxsize=10)
+        s.add("x")
+        s.add("y")
+        assert len(s) == 2
+
+    def test_duplicate_add_does_not_grow(self):
+        s = BoundedSet(maxsize=5)
+        s.add("a")
+        s.add("a")
+        assert len(s) == 1
+
+    def test_discard_removes_item(self):
+        s = BoundedSet(maxsize=5)
+        s.add("a")
+        s.discard("a")
+        assert "a" not in s
+
+    def test_discard_missing_item_no_error(self):
+        s = BoundedSet(maxsize=5)
+        s.discard("nonexistent")  # should not raise

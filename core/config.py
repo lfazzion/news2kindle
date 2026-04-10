@@ -4,6 +4,7 @@ import itertools
 import logging
 import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -20,7 +21,21 @@ EMAIL_ACCOUNT: str | None = os.environ.get("EMAIL_ACCOUNT")
 EMAIL_PASSWORD: str | None = os.environ.get("EMAIL_PASSWORD")
 IMAP_SERVER: str = os.environ.get("IMAP_SERVER") or "imap.gmail.com"
 SMTP_SERVER: str = os.environ.get("SMTP_SERVER") or "smtp.gmail.com"
-SMTP_PORT: int = int(os.environ.get("SMTP_PORT") or "587")
+
+
+def _parse_smtp_port() -> int:
+    """Parses SMTP_PORT env var with a descriptive error on invalid input."""
+    raw = os.environ.get("SMTP_PORT", "465")
+    try:
+        port = int(raw)
+    except ValueError:
+        raise ValueError(f"SMTP_PORT must be a valid integer, got: {raw!r}") from None
+    if not (1 <= port <= 65535):
+        raise ValueError(f"SMTP_PORT must be between 1 and 65535, got: {port}")
+    return port
+
+
+SMTP_PORT: int = _parse_smtp_port()
 KINDLE_EMAIL: str | None = os.environ.get("KINDLE_EMAIL")
 GOOGLE_API_KEY: str | None = os.environ.get("GOOGLE_API_KEY")
 
@@ -76,7 +91,36 @@ MIN_HTML_RESPONSE_LENGTH = 2000
 HTTP_BLOCK_STATUS_CODES: frozenset[int] = frozenset({403, 429, 451, 503})
 SCRAPER_URL_TIMEOUT = 30.0
 
-_FAILED_URLS_CACHE: set[str] = set()
+
+class BoundedSet:
+    """Set com tamanho máximo (FIFO eviction).
+
+    Evita memory leak em processos longos.
+    """
+
+    def __init__(self, maxsize: int = 500) -> None:
+        self._data: OrderedDict[str, None] = OrderedDict()
+        self._maxsize = maxsize
+
+    def add(self, item: str) -> None:
+        if item in self._data:
+            self._data.move_to_end(item)
+            return
+        if len(self._data) >= self._maxsize:
+            self._data.popitem(last=False)
+        self._data[item] = None
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._data
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def discard(self, item: str) -> None:
+        self._data.pop(item, None)
+
+
+_FAILED_URLS_CACHE: BoundedSet = BoundedSet(maxsize=500)
 
 LEVEL_ORDER: list[str] = ["principal", "secundaria", "notas_curtas"]
 LEVEL_PRIORITY: dict[str, int] = {"principal": 0, "secundaria": 1, "notas_curtas": 2}
@@ -323,6 +367,41 @@ _MARKDOWNIFY_TAGS: list[str] = [
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _extract_preloaded_json(html: str) -> dict | None:
+    """Extrai JSON de window.__preloadedData/etc. usando depth counting.
+
+    Evita o backtracking O(n²) do _PRELOADED_JSON_RE em HTMLs grandes.
+    """
+    import json as _json
+
+    prefixes = (
+        "window.__preloadedData=",
+        "window.__NEXT_DATA__=",
+        "window.__PRELOADED_STATE__=",
+    )
+    for prefix in prefixes:
+        idx = html.find(prefix)
+        if idx == -1:
+            continue
+        brace_start = html.find("{", idx)
+        if brace_start == -1:
+            continue
+        depth, i = 0, brace_start
+        while i < len(html):
+            ch = html[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return _json.loads(html[brace_start : i + 1])
+                    except _json.JSONDecodeError:
+                        break
+            i += 1
+    return None
 
 
 def _is_blocked_content(text: str) -> bool:

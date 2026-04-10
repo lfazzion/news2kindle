@@ -35,7 +35,7 @@ class TestSendToKindle:
             mock_send.assert_called_once()
             call_kwargs = mock_send.call_args
             assert call_kwargs.kwargs["hostname"] == "smtp.gmail.com"
-            assert call_kwargs.kwargs["port"] == 587
+            assert call_kwargs.kwargs["port"] == 465
 
     @pytest.mark.asyncio
     async def test_returns_false_on_smtp_error(self, monkeypatch):

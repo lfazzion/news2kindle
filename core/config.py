@@ -1,6 +1,7 @@
 """Shared constants, dataclasses, and helper functions for the newsletter pipeline."""
 
 import itertools
+import json
 import logging
 import os
 import re
@@ -93,7 +94,7 @@ SCRAPER_URL_TIMEOUT = 30.0
 
 
 class BoundedSet:
-    """Set com tamanho máximo (FIFO eviction).
+    """Set com tamanho máximo (LRU eviction).
 
     Evita memory leak em processos longos.
     """
@@ -374,8 +375,6 @@ def _extract_preloaded_json(html: str) -> dict | None:
 
     Evita o backtracking O(n²) do _PRELOADED_JSON_RE em HTMLs grandes.
     """
-    import json as _json
-
     prefixes = (
         "window.__preloadedData",
         "window.__NEXT_DATA__",
@@ -402,8 +401,8 @@ def _extract_preloaded_json(html: str) -> dict | None:
                 depth -= 1
                 if depth == 0:
                     try:
-                        return _json.loads(html[brace_start : i + 1])
-                    except _json.JSONDecodeError:
+                        return json.loads(html[brace_start : i + 1])
+                    except json.JSONDecodeError:
                         break
             i += 1
     return None

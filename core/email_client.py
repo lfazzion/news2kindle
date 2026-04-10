@@ -59,6 +59,14 @@ def _fetch_emails_sync() -> tuple[list[CacheDocument], list[str], list[str], set
 
             for msg in messages:
                 html_body = msg.html or msg.text
+                if html_body is None:
+                    logger.warning(
+                        "Email UID %s has no HTML or text body — marking for deletion.",
+                        msg.uid,
+                    )
+                    processed.append(msg.uid)
+                    continue
+
                 text_md, urls_of_mail = extract_text_from_html(html_body, seen_urls)
 
                 if text_md:
@@ -126,8 +134,8 @@ async def send_to_kindle(summary_text: str, date_str: str) -> bool:
             port=SMTP_PORT,
             username=EMAIL_ACCOUNT,
             password=EMAIL_PASSWORD,
-            use_tls=False,
-            start_tls=True,
+            use_tls=True,
+            start_tls=False,
         )
 
     try:
@@ -146,9 +154,13 @@ def _cleanup_emails_sync(email_uids: list[str]) -> None:
     try:
         with MailBox(IMAP_SERVER).login(EMAIL_ACCOUNT, EMAIL_PASSWORD) as mailbox:
             if "gmail.com" in IMAP_SERVER.lower():
+                # Gmail: X-GM-LABELS moves to Trash. Do NOT call mailbox.delete()
+                # afterwards — permanently deletes instead of keeping in Trash.
                 uid_str = clean_uids(email_uids)
                 mailbox.client.uid("STORE", uid_str, "+X-GM-LABELS", "(\\Trash)")
-            mailbox.delete(email_uids)
+            else:
+                # Other IMAP providers: standard \Deleted flag + expunge
+                mailbox.delete(email_uids)
             mailbox.client.expunge()
             logger.info("Processed %d email(s) moved to Trash.", len(email_uids))
     except Exception as e:

@@ -307,7 +307,9 @@ class TestSafeLegacyFallback:
 
         mock_session = AsyncMock()
         mock_session.get = AsyncMock(side_effect=ConnectionError("Simulated failure"))
-        monkeypatch.setattr("core.scraper._get_async_session", lambda: mock_session)
+        monkeypatch.setattr(
+            "core.scraper._get_async_session", AsyncMock(return_value=mock_session)
+        )
 
         md, url = asyncio.run(_safe_legacy_fallback("https://example.com/article"))
         assert md == ""

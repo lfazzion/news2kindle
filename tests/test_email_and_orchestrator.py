@@ -248,7 +248,9 @@ class TestFetchArticleTextAsync:
         mock_resp.text = "Blocked"
         mock_session.get = AsyncMock(return_value=mock_resp)
         monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth_fail)
-        monkeypatch.setattr("core.scraper._get_async_session", lambda: mock_session)
+        monkeypatch.setattr(
+            "core.scraper._get_async_session", AsyncMock(return_value=mock_session)
+        )
 
         semaphore = asyncio.Semaphore(5)
         result = await fetch_article_text_async("https://example.com", semaphore)

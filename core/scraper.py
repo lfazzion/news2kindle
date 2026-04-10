@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from urllib.parse import urlparse, urlunparse
 
 import markdownify
 import trafilatura
@@ -13,6 +14,7 @@ from core.config import (
     HTTP_BLOCK_STATUS_CODES,
     MIN_HTML_RESPONSE_LENGTH,
     MIN_JSON_EXTRACT_LENGTH,
+    SCRAPER_PROXY_LIST,
     SCRAPER_URL_TIMEOUT,
     _extract_preloaded_json,
     _is_blocked_content,
@@ -21,6 +23,22 @@ from core.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _mask_proxy_url(url: str) -> str:
+    """Mascara user:pass de URLs de proxy antes de logar."""
+    try:
+        parsed = urlparse(url)
+        if parsed.username or parsed.password:
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc += f":{parsed.port}"
+            masked = parsed._replace(netloc=f"***:***@{netloc}")
+            return urlunparse(masked)
+    except Exception:
+        pass
+    return url
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -46,22 +64,28 @@ _BROWSER_HEADERS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 _async_session: AsyncSession | None = None
+_session_lock: asyncio.Lock | None = None
 
 
-def _get_async_session() -> AsyncSession:
-    """Returns a lazily-initialised AsyncSession with Chrome TLS impersonation.
+def _get_session_lock() -> asyncio.Lock:
+    """Retorna o lock de sessão, criando-o lazily no event loop atual."""
+    global _session_lock
+    if _session_lock is None:
+        _session_lock = asyncio.Lock()
+    return _session_lock
 
-    The session reuses TLS connections for fingerprint consistency.
-    Proxy is NOT set here — it is passed per-request via proxy= parameter
-    in _safe_legacy_fallback() to enable round-robin rotation.
-    """
+
+async def _get_async_session() -> AsyncSession:
+    """Lazy init thread-safe com double-checked locking (BUG-03)."""
     global _async_session
     if _async_session is None:
-        _async_session = AsyncSession(
-            impersonate="chrome",
-            headers=_BROWSER_HEADERS,
-        )
-        logger.debug("curl_cffi AsyncSession created (no proxy on session).")
+        async with _get_session_lock():
+            if _async_session is None:
+                _async_session = AsyncSession(
+                    impersonate="chrome",
+                    headers=_BROWSER_HEADERS,
+                )
+                logger.debug("curl_cffi AsyncSession created (no proxy on session).")
     return _async_session
 
 
@@ -242,7 +266,7 @@ async def _safe_legacy_fallback(
     proxy: str | None = None,
 ) -> tuple[str, str]:
     """Fallback: curl_cffi AsyncSession with per-request proxy rotation."""
-    session = _get_async_session()
+    session = await _get_async_session()
     try:
         req = await session.get(url, proxy=proxy, timeout=SCRAPER_URL_TIMEOUT)
         resolved_url = _strip_query(req.url)
@@ -270,7 +294,10 @@ async def _safe_legacy_fallback(
         logger.info("curl_cffi fallback succeeded for %s", url[:60])
         return md_text, resolved_url
     except Exception as e:
-        logger.warning("curl_cffi fallback failed for %s: %s", url[:60], e)
+        safe_msg = str(e)
+        for proxy in SCRAPER_PROXY_LIST:
+            safe_msg = safe_msg.replace(proxy, _mask_proxy_url(proxy))
+        logger.warning("curl_cffi fallback failed for %s: %s", url[:60], safe_msg)
         return "", url
 
 

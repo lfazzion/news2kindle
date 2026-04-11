@@ -35,7 +35,7 @@ class TestSendToKindle:
             mock_send.assert_called_once()
             call_kwargs = mock_send.call_args
             assert call_kwargs.kwargs["hostname"] == "smtp.gmail.com"
-            assert call_kwargs.kwargs["port"] == 587
+            assert call_kwargs.kwargs["port"] == 465
 
     @pytest.mark.asyncio
     async def test_returns_false_on_smtp_error(self, monkeypatch):
@@ -67,7 +67,10 @@ class TestCleanupEmails:
 
     @pytest.mark.asyncio
     async def test_calls_delete_and_expunge(self, monkeypatch):
-        """Verifies the sync cleanup function calls delete and expunge."""
+        """Verifies the sync cleanup function calls delete and expunge on non-Gmail."""
+        import core.email_client as ec
+
+        monkeypatch.setattr(ec, "IMAP_SERVER", "imap.outlook.com")
         mock_mailbox_ctx = MagicMock()
         mock_mailbox_ctx.client = MagicMock()
 
@@ -248,7 +251,9 @@ class TestFetchArticleTextAsync:
         mock_resp.text = "Blocked"
         mock_session.get = AsyncMock(return_value=mock_resp)
         monkeypatch.setattr("core.scraper._fetch_stealth_sync", mock_stealth_fail)
-        monkeypatch.setattr("core.scraper._get_async_session", lambda: mock_session)
+        monkeypatch.setattr(
+            "core.scraper._get_async_session", AsyncMock(return_value=mock_session)
+        )
 
         semaphore = asyncio.Semaphore(5)
         result = await fetch_article_text_async("https://example.com", semaphore)
@@ -307,3 +312,52 @@ class TestFetchArticleTextAsync:
         assert max_concurrent <= 2, (
             f"Max concurrency was {max_concurrent}, expected <= 2"
         )
+
+
+# ===========================================================================
+# _cleanup_emails_sync — Gmail vs. other IMAP providers
+# ===========================================================================
+
+
+class TestCleanupEmailsGmailVsOther:
+    def _make_mock_mailbox_ctx(self):
+        """Returns (MockMailBox class, mock_ctx) — mock_ctx is the context object."""
+        mock_ctx = MagicMock()
+        mock_ctx.client = MagicMock()
+        mock_login = MagicMock()
+        mock_login.__enter__ = MagicMock(return_value=mock_ctx)
+        mock_login.__exit__ = MagicMock(return_value=False)
+
+        MockMailBox = MagicMock()
+        MockMailBox.return_value.login.return_value = mock_login
+        return MockMailBox, mock_ctx
+
+    def test_gmail_uses_xgm_labels_not_delete(self, monkeypatch):
+        import core.email_client as ec
+
+        monkeypatch.setattr(ec, "IMAP_SERVER", "imap.gmail.com")
+        MockMailBox, mock_ctx = self._make_mock_mailbox_ctx()
+
+        with patch("core.email_client.MailBox", MockMailBox):
+            ec._cleanup_emails_sync(["1", "2"])
+
+        mock_ctx.client.uid.assert_called_once()
+        mock_ctx.delete.assert_not_called()
+
+    def test_non_gmail_uses_delete(self, monkeypatch):
+        import core.email_client as ec
+
+        monkeypatch.setattr(ec, "IMAP_SERVER", "imap.outlook.com")
+        MockMailBox, mock_ctx = self._make_mock_mailbox_ctx()
+
+        with patch("core.email_client.MailBox", MockMailBox):
+            ec._cleanup_emails_sync(["1"])
+
+        mock_ctx.delete.assert_called_once_with(["1"])
+        mock_ctx.client.uid.assert_not_called()
+
+    def test_empty_uids_does_nothing(self):
+        import core.email_client as ec
+
+        # Should not raise or attempt any IMAP connection
+        ec._cleanup_emails_sync([])

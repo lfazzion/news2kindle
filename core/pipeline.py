@@ -9,6 +9,7 @@ import os
 import random
 import time
 from dataclasses import asdict
+from html import escape
 
 from google.genai import errors as genai_errors
 
@@ -30,13 +31,47 @@ from core.config import (
     EnrichedNews,
     _extract_clean_response,
     _strip_query,
+    sanitize_html_for_kindle,
+    sanitize_untrusted_content,
 )
 from core.email_client import _fetch_emails_sync, cleanup_emails, send_to_kindle
 from core.gemini import _generate_content_async, _get_genai_client, _local_count_tokens
-from core.prompts import HTML_TRANSLATE_PROMPT, JSON_CATEGORIZE_PROMPT
+from core.prompts import (
+    CATEGORIZE_SYSTEM_INSTRUCTION,
+    HTML_TRANSLATE_PROMPT,
+    JSON_CATEGORIZE_PROMPT,
+    TRANSLATE_SYSTEM_INSTRUCTION,
+)
 from core.scraper import _reset_async_session, fetch_article_text_async
 
 logger = logging.getLogger(__name__)
+
+_VALID_LEVELS: frozenset[str] = frozenset({"principal", "secundaria", "notas_curtas"})
+
+
+def _validate_grouped_item(item: dict, idx: int) -> bool:
+    """Valida e corrige in-place um item de grouped_news retornado pelo LLM.
+
+    Retorna False se o item deve ser descartado.
+    """
+    title = item.get("title")
+    level = item.get("level")
+    cache_ids = item.get("cache_ids")
+
+    if not isinstance(title, str) or not title.strip():
+        logger.warning("Grouped item %d: 'title' inválido ou ausente: %r", idx, title)
+        return False
+    if level not in _VALID_LEVELS:
+        logger.warning(
+            "Grouped item %d: 'level' inválido %r, rebaixando para 'secundaria'.",
+            idx,
+            level,
+        )
+        item["level"] = "secundaria"
+    if not isinstance(cache_ids, list) or not cache_ids:
+        logger.warning("Grouped item %d: 'cache_ids' inválido: %r", idx, cache_ids)
+        return False
+    return True
 
 
 async def categorize_news(cache_global: list[CacheDocument]) -> dict | None:
@@ -55,7 +90,8 @@ async def categorize_news(cache_global: list[CacheDocument]) -> dict | None:
         len(cache_global),
     )
     items_for_prompt = [
-        get_item_tokens({"id": doc.id, "text": doc.text}) for doc in cache_global
+        get_item_tokens({"id": doc.id, "text": sanitize_untrusted_content(doc.text)})
+        for doc in cache_global
     ]
 
     chunks_json_str: list[str] = []
@@ -87,6 +123,7 @@ async def categorize_news(cache_global: list[CacheDocument]) -> dict | None:
                 client,
                 JSON_CATEGORIZE_PROMPT.format(text=chunk_str),
                 model=ROUTER_MODEL,
+                system_instruction=CATEGORIZE_SYSTEM_INSTRUCTION,
             )
             json_str = _extract_clean_response(response.text or "")
             data = json.loads(json_str)
@@ -98,7 +135,12 @@ async def categorize_news(cache_global: list[CacheDocument]) -> dict | None:
                 )
                 continue
 
-            all_grouped_news.extend(data["grouped_news"])
+            validated = [
+                g
+                for item_idx, g in enumerate(data["grouped_news"])
+                if _validate_grouped_item(g, item_idx)
+            ]
+            all_grouped_news.extend(validated)
 
         if not all_grouped_news:
             return None
@@ -207,7 +249,7 @@ def match_cache_to_groups(
                 EnrichedNews(
                     title=title,
                     level=level,
-                    content="\n\n---\n\n".join(texts),
+                    content=sanitize_untrusted_content("\n\n---\n\n".join(texts)),
                 )
             )
 
@@ -306,8 +348,10 @@ async def summarize_text(enriched_news: list[EnrichedNews]) -> str | None:
                 client,
                 HTML_TRANSLATE_PROMPT.format(level=nivel, content=conteudo_junto),
                 model=model_to_use,
+                system_instruction=TRANSLATE_SYSTEM_INSTRUCTION,
             )
-            return _extract_clean_response(response.text or "")
+            raw_html = _extract_clean_response(response.text or "")
+            return sanitize_html_for_kindle(raw_html)
 
         logger.warning(
             "Bandeja '%s' exigiria %d tokens, o que excede o "
@@ -326,8 +370,10 @@ async def summarize_text(enriched_news: list[EnrichedNews]) -> str | None:
                 client,
                 HTML_TRANSLATE_PROMPT.format(level=nivel, content=conteudo_junto),
                 model=model_to_use,
+                system_instruction=TRANSLATE_SYSTEM_INSTRUCTION,
             )
-            return _extract_clean_response(response.text or "")
+            raw_html = _extract_clean_response(response.text or "")
+            return sanitize_html_for_kindle(raw_html)
 
         mid = len(lista_noticias) // 2
         esquerda = lista_noticias[:mid]
@@ -389,7 +435,8 @@ async def summarize_text(enriched_news: list[EnrichedNews]) -> str | None:
             toc_parts.append("<ul class='indice-lista'>")
             for item in grupos[nivel_esperado]:
                 toc_parts.append(
-                    f"<li><a href='#{item.anchor_id}'>&bull; {item.title}</a></li>"
+                    f"<li><a href='#{item.anchor_id}'>"
+                    f"&bull; {escape(item.title)}</a></li>"
                 )
             toc_parts.append("</ul>")
     html_parts.extend(toc_parts)
@@ -438,8 +485,11 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
 
     doc_counter = len(cache_global)
 
+    deduped_urls: list[str] = []
+    retry_candidates: list[str] = []
+    retry_still_failed: list[str] = []
+
     if global_urls_to_fetch:
-        deduped_urls: list[str] = []
         _seen_base: set[str] = set()
         for u in global_urls_to_fetch:
             base = _strip_query(u)
@@ -548,9 +598,9 @@ async def extract_all_content_async() -> tuple[list[CacheDocument], list[str]]:
         sum(1 for d in cache_global if d.source == "link_externo"),
     )
     if global_urls_to_fetch:
-        total_queued = len(deduped_urls)  # type: ignore[possibly-unbound]
+        total_queued = len(deduped_urls)
         total_success = sum(1 for d in cache_global if d.source == "link_externo")
-        total_failed = len(retry_still_failed) if retry_candidates else 0  # type: ignore[possibly-unbound]
+        total_failed = len(retry_still_failed) if retry_candidates else 0
         logger.info(
             "Scraping summary: %d queued → %d succeeded, %d failed.",
             total_queued,
@@ -667,19 +717,24 @@ async def process_newsletters() -> None:
     logger.info("Summary generated. Sending to Kindle…")
     today_str = datetime.date.today().strftime("%Y/%m/%d")
 
-    if not await send_to_kindle(summary, today_str):
-        return
+    kindle_sent = await send_to_kindle(summary, today_str)
+    if not kindle_sent:
+        logger.error("Failed to send to Kindle.")
 
-    if emails_to_delete:
+    if kindle_sent and emails_to_delete:
         await cleanup_emails(emails_to_delete)
 
-    for cache_path in (CACHE_FILE, CACHE_UIDS_FILE):
-        if os.path.exists(cache_path):
-            try:
-                os.remove(cache_path)
-            except Exception as e:
-                logger.warning("Failed to remove cache file %s: %s", cache_path, e)
-    logger.info("Local failover cache files purged.")
+    if kindle_sent:
+        for cache_path in (CACHE_FILE, CACHE_UIDS_FILE):
+            if os.path.exists(cache_path):
+                try:
+                    os.remove(cache_path)
+                except Exception as e:
+                    logger.warning("Failed to remove cache file %s: %s", cache_path, e)
+        logger.info("Local failover cache files purged.")
+
+    if not kindle_sent:
+        return
 
     metrics["total_s"] = round(time.monotonic() - t_total, 1)
     metrics["docs"] = len(cache_global)

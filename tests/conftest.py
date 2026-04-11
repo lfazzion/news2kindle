@@ -19,7 +19,7 @@ os.environ.setdefault("EMAIL_ACCOUNT", "test@example.com")
 os.environ.setdefault("EMAIL_PASSWORD", "testpassword")
 os.environ.setdefault("IMAP_SERVER", "imap.gmail.com")
 os.environ.setdefault("SMTP_SERVER", "smtp.gmail.com")
-os.environ.setdefault("SMTP_PORT", "587")
+os.environ.setdefault("SMTP_PORT", "465")
 os.environ.setdefault("KINDLE_EMAIL", "kindle@example.com")
 os.environ.setdefault("GOOGLE_API_KEY", "fake-api-key-for-testing")
 

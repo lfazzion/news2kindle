@@ -65,7 +65,7 @@ Rate limiters are lazily initialized in `_init_limiters()` to avoid binding to a
 ## Environment variables
 
 Required: `EMAIL_ACCOUNT`, `EMAIL_PASSWORD`, `KINDLE_EMAIL`, `GOOGLE_API_KEY`.  
-Optional: `IMAP_SERVER` (default `imap.gmail.com`), `SMTP_SERVER`, `SMTP_PORT` (587), `SCRAPER_PROXY_LIST` (CSV of proxy URLs for bypassing Cloudflare on GitHub Actions datacenter IPs).
+Optional: `IMAP_SERVER` (default `imap.gmail.com`), `SMTP_SERVER`, `SMTP_PORT` (465), `SCRAPER_PROXY_LIST` (CSV of proxy URLs for bypassing Cloudflare on GitHub Actions datacenter IPs).
 
 Validated at startup by `config._validate_config()`. Use a `.env` file locally (`python-dotenv` is loaded in `config.py`).
 

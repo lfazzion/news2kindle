@@ -1,11 +1,14 @@
 """Shared constants, dataclasses, and helper functions for the newsletter pipeline."""
 
 import itertools
+import json
 import logging
 import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 
+import nh3
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,7 +23,21 @@ EMAIL_ACCOUNT: str | None = os.environ.get("EMAIL_ACCOUNT")
 EMAIL_PASSWORD: str | None = os.environ.get("EMAIL_PASSWORD")
 IMAP_SERVER: str = os.environ.get("IMAP_SERVER") or "imap.gmail.com"
 SMTP_SERVER: str = os.environ.get("SMTP_SERVER") or "smtp.gmail.com"
-SMTP_PORT: int = int(os.environ.get("SMTP_PORT") or "587")
+
+
+def _parse_smtp_port() -> int:
+    """Parses SMTP_PORT env var with a descriptive error on invalid input."""
+    raw = os.environ.get("SMTP_PORT", "465")
+    try:
+        port = int(raw)
+    except ValueError:
+        raise ValueError(f"SMTP_PORT must be a valid integer, got: {raw!r}") from None
+    if not (1 <= port <= 65535):
+        raise ValueError(f"SMTP_PORT must be between 1 and 65535, got: {port}")
+    return port
+
+
+SMTP_PORT: int = _parse_smtp_port()
 KINDLE_EMAIL: str | None = os.environ.get("KINDLE_EMAIL")
 GOOGLE_API_KEY: str | None = os.environ.get("GOOGLE_API_KEY")
 
@@ -76,7 +93,36 @@ MIN_HTML_RESPONSE_LENGTH = 2000
 HTTP_BLOCK_STATUS_CODES: frozenset[int] = frozenset({403, 429, 451, 503})
 SCRAPER_URL_TIMEOUT = 30.0
 
-_FAILED_URLS_CACHE: set[str] = set()
+
+class BoundedSet:
+    """Set com tamanho máximo (LRU eviction).
+
+    Evita memory leak em processos longos.
+    """
+
+    def __init__(self, maxsize: int = 500) -> None:
+        self._data: OrderedDict[str, None] = OrderedDict()
+        self._maxsize = maxsize
+
+    def add(self, item: str) -> None:
+        if item in self._data:
+            self._data.move_to_end(item)
+            return
+        if len(self._data) >= self._maxsize:
+            self._data.popitem(last=False)
+        self._data[item] = None
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._data
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def discard(self, item: str) -> None:
+        self._data.pop(item, None)
+
+
+_FAILED_URLS_CACHE: BoundedSet = BoundedSet(maxsize=500)
 
 LEVEL_ORDER: list[str] = ["principal", "secundaria", "notas_curtas"]
 LEVEL_PRIORITY: dict[str, int] = {"principal": 0, "secundaria": 1, "notas_curtas": 2}
@@ -263,6 +309,18 @@ _JUNK_GAMES_KEYWORDS: frozenset[str] = frozenset(
 # Regex patterns
 # ---------------------------------------------------------------------------
 
+_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"ignore\s+(all\s+)?previous\s+instructions?", re.IGNORECASE),
+    re.compile(r"you\s+are\s+now\s+(in\s+)?developer\s+mode", re.IGNORECASE),
+    re.compile(r"system\s*prompt\s*[:=]", re.IGNORECASE),
+    re.compile(r"new\s+instructions?\s*:", re.IGNORECASE),
+)
+
+_INJECTION_TAGS_RE: re.Pattern[str] = re.compile(
+    r"</?(?:system|instruction|task|reminder)\b[^>]*>",
+    re.IGNORECASE,
+)
+
 _NOISE_PHRASE_RE = re.compile(
     r"(?:unsubscribe|view in browser|manage preferences"
     r"|copyright ©|all rights reserved|privacy policy"
@@ -321,8 +379,121 @@ _MARKDOWNIFY_TAGS: list[str] = [
 ]
 
 # ---------------------------------------------------------------------------
+# HTML sanitization
+# ---------------------------------------------------------------------------
+
+_KINDLE_ALLOWED_TAGS: frozenset[str] = frozenset(
+    {
+        "p",
+        "br",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "b",
+        "strong",
+        "i",
+        "em",
+        "u",
+        "blockquote",
+        "ul",
+        "ol",
+        "li",
+        "a",
+        "img",
+        "hr",
+        "span",
+        "div",
+        "table",
+        "tr",
+        "td",
+        "th",
+        "thead",
+        "tbody",
+    }
+)
+
+_KINDLE_ALLOWED_ATTRS: dict[str, set[str]] = {
+    "a": {"href", "id", "name"},
+    "img": {"src", "alt"},
+    "div": {"class"},
+    "h1": {"id"},
+    "h2": {"id"},
+    "h3": {"id", "class"},
+    "span": {"class"},
+}
+
+
+def sanitize_html_for_kindle(html: str) -> str:
+    """Sanitiza HTML gerado pelo LLM, mantendo apenas tags seguras para Kindle."""
+    return nh3.clean(
+        html,
+        tags=_KINDLE_ALLOWED_TAGS,
+        attributes=_KINDLE_ALLOWED_ATTRS,
+        strip_comments=True,
+    )
+
+
+def sanitize_untrusted_content(text: str) -> str:
+    """Remove padrões comuns de prompt injection de conteúdo raspado da web."""
+    sanitized = _INJECTION_TAGS_RE.sub("", text)
+    for pattern in _INJECTION_PATTERNS:
+        sanitized = pattern.sub("[FILTERED]", sanitized)
+    return sanitized
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _extract_preloaded_json(html: str) -> dict | None:
+    """Extrai JSON de window.__preloadedData/etc. usando depth counting.
+
+    Evita o backtracking O(n²) do _PRELOADED_JSON_RE em HTMLs grandes.
+    """
+    prefixes = (
+        "window.__preloadedData",
+        "window.__NEXT_DATA__",
+        "window.__PRELOADED_STATE__",
+    )
+    for prefix in prefixes:
+        idx = html.find(prefix)
+        if idx == -1:
+            continue
+        # Verify there is an '=' between the prefix and the opening brace
+        # (handles both `=` and ` = ` forms while rejecting unrelated vars).
+        after_prefix = html[idx + len(prefix) : idx + len(prefix) + 10].lstrip()
+        if not after_prefix.startswith("="):
+            continue
+        brace_start = html.find("{", idx + len(prefix))
+        if brace_start == -1:
+            continue
+        depth, i = 0, brace_start
+        in_string = False
+        escape_next = False
+        while i < len(html):
+            ch = html[i]
+            if escape_next:
+                escape_next = False
+            elif ch == "\\" and in_string:
+                escape_next = True
+            elif ch == '"':
+                in_string = not in_string
+            elif not in_string:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(html[brace_start : i + 1])
+                        except json.JSONDecodeError:
+                            break
+            i += 1
+    return None
 
 
 def _is_blocked_content(text: str) -> bool:
@@ -337,9 +508,11 @@ def _strip_query(url: str) -> str:
 
 
 def _extract_clean_response(text: str) -> str:
-    """Strips optional markdown code fences from an LLM response."""
-    match = _CODE_FENCE_RE.search(text)
-    return match.group(1).strip() if match else text.strip()
+    """Extrai conteúdo de code fences; concatena múltiplos blocos se houver."""
+    matches = _CODE_FENCE_RE.findall(text)
+    if matches:
+        return "\n".join(m.strip() for m in matches)
+    return text.strip()
 
 
 def _is_admin_text(text: str, admin_keywords: set[str] | frozenset[str]) -> bool:

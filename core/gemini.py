@@ -80,8 +80,8 @@ def _get_genai_client() -> genai.Client | None:
 
 
 def _local_count_tokens(model: str, text: str) -> int:
-    """Estimate token count using a simple character-based heuristic."""
-    return len(text) // 3
+    """Estimativa conservadora: chars/3 + 15% de margem para conteúdo misto."""
+    return int(len(text) / 3 * 1.15)
 
 
 # ---------------------------------------------------------------------------
@@ -101,12 +101,22 @@ async def _generate_content_retry(
     client: genai.Client,
     prompt: str,
     model: str,
+    system_instruction: str | None = None,
 ) -> genai.types.GenerateContentResponse:
     """Internal retry block. It will fail after 5 attempts."""
+    config = (
+        genai_types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=0.3,
+        )
+        if system_instruction
+        else None
+    )
     async with asyncio.timeout(90.0):
         return await client.aio.models.generate_content(
             model=model,
             contents=prompt,
+            config=config,
         )
 
 
@@ -114,10 +124,14 @@ async def _generate_content_async(
     client: genai.Client,
     prompt: str,
     model: str = GENERATOR_MODEL,
+    system_instruction: str | None = None,
 ) -> genai.types.GenerateContentResponse:
     """Calls Gemini with automatic retry, token counting, and rate limiting."""
     _init_limiters()
-    assert MODEL_RPM_LIMITERS is not None and MODEL_TPM_LIMITERS is not None
+    if MODEL_RPM_LIMITERS is None or MODEL_TPM_LIMITERS is None:
+        raise RuntimeError(
+            "Rate limiters not initialized. Call _init_limiters() first."
+        )
 
     rpm_limiter = MODEL_RPM_LIMITERS.get(model, MODEL_RPM_LIMITERS[GENERATOR_MODEL])
     tpm_limiter = MODEL_TPM_LIMITERS.get(model)
@@ -128,7 +142,9 @@ async def _generate_content_async(
             tokens_to_acquire = min(exact_tokens, tpm_limiter.max_rate)
             await tpm_limiter.acquire(tokens_to_acquire)
         async with rpm_limiter:
-            return await _generate_content_retry(client, prompt, model)
+            return await _generate_content_retry(
+                client, prompt, model, system_instruction=system_instruction
+            )
     except Exception as e:
         logger.warning(
             "Error during token counting or generation: %s", e, exc_info=True
@@ -160,7 +176,12 @@ async def _generate_content_async(
                     tokens_to_acquire = min(exact_tokens, fb_tpm.max_rate)
                     await fb_tpm.acquire(tokens_to_acquire)
                 async with fb_rpm:
-                    return await _generate_content_retry(client, prompt, fallback_model)
+                    return await _generate_content_retry(
+                        client,
+                        prompt,
+                        fallback_model,
+                        system_instruction=system_instruction,
+                    )
             except Exception:
                 logger.warning("Fallback model %s also failed.", fallback_model)
 

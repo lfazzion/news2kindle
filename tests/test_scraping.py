@@ -13,10 +13,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.config import (
-    _PRELOADED_JSON_RE,
     HTTP_BLOCK_STATUS_CODES,
     MIN_HTML_RESPONSE_LENGTH,
     SCRAPER_URL_TIMEOUT,
+    _extract_preloaded_json,
     _is_blocked_content,
 )
 from core.scraper import (
@@ -24,6 +24,7 @@ from core.scraper import (
     _fetch_article_text_async_impl,
     _fetch_stealth_sync,
     _get_async_session,
+    _mask_proxy_url,
     _parse_html_to_markdown,
     _safe_legacy_fallback,
     fetch_article_text_async,
@@ -49,7 +50,9 @@ def _patch_async_session(monkeypatch, response):
     """Monkeypatches _get_async_session to return a mock session."""
     mock_session = AsyncMock()
     mock_session.get = AsyncMock(return_value=response)
-    monkeypatch.setattr("core.scraper._get_async_session", lambda: mock_session)
+    monkeypatch.setattr(
+        "core.scraper._get_async_session", AsyncMock(return_value=mock_session)
+    )
     return mock_session
 
 
@@ -210,7 +213,9 @@ class TestCurlCffiFallback:
     async def test_curl_exception_returns_empty(self, monkeypatch):
         mock_session = AsyncMock()
         mock_session.get = AsyncMock(side_effect=ConnectionError("down"))
-        monkeypatch.setattr("core.scraper._get_async_session", lambda: mock_session)
+        monkeypatch.setattr(
+            "core.scraper._get_async_session", AsyncMock(return_value=mock_session)
+        )
         md, url = await _safe_legacy_fallback("https://example.com/article")
         assert md == ""
 
@@ -547,38 +552,42 @@ class TestExpandedMarkdownTags:
 # ===========================================================================
 
 
-class TestExpandedPreloadedDataRegex:
-    """Tests for multi-pattern preloaded data extraction."""
+class TestExtractPreloadedJson:
+    """Tests for multi-pattern preloaded data extraction via _extract_preloaded_json."""
 
     def test_matches_preloaded_data(self):
         html = 'window.__preloadedData = {"key": "val"};'
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match
-        assert '"key"' in match.group(1)
+        result = _extract_preloaded_json(html)
+        assert result == {"key": "val"}
 
     def test_matches_next_data(self):
         html = (
             'window.__NEXT_DATA__ = {"props": {"pageProps": {"article": "content"}}};'
         )
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match
-        assert '"props"' in match.group(1)
+        result = _extract_preloaded_json(html)
+        assert result is not None
+        assert "props" in result
 
     def test_matches_preloaded_state(self):
         html = 'window.__PRELOADED_STATE__ = {"data": {"items": []}};'
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match
-        assert '"data"' in match.group(1)
+        result = _extract_preloaded_json(html)
+        assert result is not None
+        assert "data" in result
 
     def test_matches_with_spaces_around_equals(self):
         html = 'window.__NEXT_DATA__  =  {"page": "article"};'
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match
+        result = _extract_preloaded_json(html)
+        assert result is not None
 
     def test_no_match_on_unrelated_variable(self):
         html = 'window.someOtherVar = {"data": "value"};'
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match is None
+        result = _extract_preloaded_json(html)
+        assert result is None
+
+    def test_ignores_braces_inside_string_values(self):
+        html = 'window.__NEXT_DATA__ = {"text": "use {braces} here", "ok": true};'
+        result = _extract_preloaded_json(html)
+        assert result == {"text": "use {braces} here", "ok": True}
 
     def test_parse_html_extracts_next_data(self):
         """Verify __NEXT_DATA__ is actually used by _parse_html_to_markdown."""
@@ -626,19 +635,21 @@ class TestNewConstants:
 class TestAsyncSessionLifecycle:
     """Verify AsyncSession singleton and proxy passthrough."""
 
-    def test_get_async_session_returns_session(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_get_async_session_returns_session(self, monkeypatch):
         """_get_async_session should return an AsyncSession instance."""
         mock_session = MagicMock()
         monkeypatch.setattr("core.scraper._async_session", None)
         monkeypatch.setattr("core.scraper.AsyncSession", lambda **kw: mock_session)
-        result = _get_async_session()
+        result = await _get_async_session()
         assert result is mock_session
 
-    def test_get_async_session_caches_instance(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_get_async_session_caches_instance(self, monkeypatch):
         """Second call should return the same instance."""
         mock_session = MagicMock()
         monkeypatch.setattr("core.scraper._async_session", mock_session)
-        result = _get_async_session()
+        result = await _get_async_session()
         assert result is mock_session
 
 
@@ -684,3 +695,32 @@ class TestBurstDelays:
         delays = _burst_delays(10, burst_size=2, min_pause=3.0, max_pause=7.0)
         for d in delays:
             assert 3.0 <= d <= 7.0
+
+
+# ===========================================================================
+# Proxy URL masking (SEC-04)
+# ===========================================================================
+
+
+class TestMaskProxyUrl:
+    def test_masks_user_and_password(self):
+        url = "http://user:secret@proxy.example.com:8080"
+        masked = _mask_proxy_url(url)
+        assert "secret" not in masked
+        assert "user" not in masked
+        assert "proxy.example.com" in masked
+        assert "8080" in masked
+
+    def test_no_credentials_unchanged(self):
+        url = "http://proxy.example.com:8080"
+        assert _mask_proxy_url(url) == url
+
+    def test_url_without_port_masked(self):
+        url = "http://admin:pass@proxy.example.com"
+        masked = _mask_proxy_url(url)
+        assert "pass" not in masked
+        assert "proxy.example.com" in masked
+
+    def test_non_url_returns_original(self):
+        url = "not-a-url"
+        assert _mask_proxy_url(url) == url

@@ -101,16 +101,12 @@ def extract_text_from_html(
             if is_nyt_link and not url.startswith("https://nl.nytimes.com/"):
                 continue
 
-            if (
+            is_candidate = (
                 is_read_link
                 or is_rich_external
-                and not _is_admin_text(cleaned_text, _ADMIN_KEYWORDS)
-                or (
-                    is_partner_domain
-                    and len(cleaned_text) > 20
-                    and not _is_admin_text(cleaned_text, _ADMIN_KEYWORDS)
-                )
-            ):
+                or (is_partner_domain and len(cleaned_text) > 20)
+            )
+            if is_candidate and not _is_admin_text(cleaned_text, _ADMIN_KEYWORDS):
                 is_valid_news = True
 
         if is_valid_news:

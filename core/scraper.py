@@ -1,8 +1,8 @@
 """HTTP scraping: stealth-requests primary + curl_cffi fallback."""
 
 import asyncio
-import json
 import logging
+from urllib.parse import urlparse, urlunparse
 
 import markdownify
 import trafilatura
@@ -11,17 +11,34 @@ from curl_cffi.requests import AsyncSession
 from core.config import (
     _DENY_DOMAINS,
     _MARKDOWNIFY_TAGS,
-    _PRELOADED_JSON_RE,
     HTTP_BLOCK_STATUS_CODES,
     MIN_HTML_RESPONSE_LENGTH,
     MIN_JSON_EXTRACT_LENGTH,
+    SCRAPER_PROXY_LIST,
     SCRAPER_URL_TIMEOUT,
+    _extract_preloaded_json,
     _is_blocked_content,
     _next_proxy,
     _strip_query,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _mask_proxy_url(url: str) -> str:
+    """Mascara user:pass de URLs de proxy antes de logar."""
+    try:
+        parsed = urlparse(url)
+        if parsed.username or parsed.password:
+            netloc = parsed.hostname or ""
+            if parsed.port:
+                netloc += f":{parsed.port}"
+            masked = parsed._replace(netloc=f"***:***@{netloc}")
+            return urlunparse(masked)
+    except Exception:
+        pass
+    return url
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -47,22 +64,20 @@ _BROWSER_HEADERS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 _async_session: AsyncSession | None = None
+_session_lock: asyncio.Lock = asyncio.Lock()
 
 
-def _get_async_session() -> AsyncSession:
-    """Returns a lazily-initialised AsyncSession with Chrome TLS impersonation.
-
-    The session reuses TLS connections for fingerprint consistency.
-    Proxy is NOT set here — it is passed per-request via proxy= parameter
-    in _safe_legacy_fallback() to enable round-robin rotation.
-    """
+async def _get_async_session() -> AsyncSession:
+    """Lazy init thread-safe com double-checked locking (BUG-03)."""
     global _async_session
     if _async_session is None:
-        _async_session = AsyncSession(
-            impersonate="chrome",
-            headers=_BROWSER_HEADERS,
-        )
-        logger.debug("curl_cffi AsyncSession created (no proxy on session).")
+        async with _session_lock:
+            if _async_session is None:
+                _async_session = AsyncSession(
+                    impersonate="chrome",
+                    headers=_BROWSER_HEADERS,
+                )
+                logger.debug("curl_cffi AsyncSession created (no proxy on session).")
     return _async_session
 
 
@@ -120,41 +135,33 @@ def _parse_html_to_markdown(html: str, target_url: str) -> tuple[str, str]:
     4. trafilatura metadata fallback (title + og:description)
     """
     # 1. Try extracting from JS state variables
-    match = _PRELOADED_JSON_RE.search(html)
-    if match:
-        try:
-            data = json.loads(match.group(1))
-            texts: list[str] = []
-            stack: list[dict | list] = [data]
-            while stack:
-                current = stack.pop()
-                if isinstance(current, dict):
-                    for k, v in current.items():
-                        if (
-                            k == "text"
-                            and isinstance(v, str)
-                            and len(v) > 50
-                            and "<" not in v
-                        ):
-                            texts.append(v)
-                        elif isinstance(v, (dict, list)):
-                            stack.append(v)
-                elif isinstance(current, list):
-                    stack.extend(
-                        item for item in current if isinstance(item, (dict, list))
-                    )
+    data = _extract_preloaded_json(html)
+    if data is not None:
+        texts: list[str] = []
+        stack: list[dict | list] = [data]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, dict):
+                for k, v in current.items():
+                    if (
+                        k == "text"
+                        and isinstance(v, str)
+                        and len(v) > 50
+                        and "<" not in v
+                    ):
+                        texts.append(v)
+                    elif isinstance(v, (dict, list)):
+                        stack.append(v)
+            elif isinstance(current, list):
+                stack.extend(item for item in current if isinstance(item, (dict, list)))
 
-            text = "\n".join(texts)
-            if len(text) > MIN_JSON_EXTRACT_LENGTH:
-                if _is_blocked_content(text):
-                    logger.debug("Bypass hit anti-bot/error wall via JSON.")
-                    return "", target_url
-                logger.debug("Paywall bypass via JSON succeeded (%d chars).", len(text))
-                return text, target_url
-        except json.JSONDecodeError:
-            logger.debug(
-                "Failed to parse preloadedData JSON; falling back to HTML parsing."
-            )
+        text = "\n".join(texts)
+        if len(text) > MIN_JSON_EXTRACT_LENGTH:
+            if _is_blocked_content(text):
+                logger.debug("Bypass hit anti-bot/error wall via JSON.")
+                return "", target_url
+            logger.debug("Paywall bypass via JSON succeeded (%d chars).", len(text))
+            return text, target_url
     else:
         logger.debug(
             "No preloaded JS data found "
@@ -251,7 +258,7 @@ async def _safe_legacy_fallback(
     proxy: str | None = None,
 ) -> tuple[str, str]:
     """Fallback: curl_cffi AsyncSession with per-request proxy rotation."""
-    session = _get_async_session()
+    session = await _get_async_session()
     try:
         req = await session.get(url, proxy=proxy, timeout=SCRAPER_URL_TIMEOUT)
         resolved_url = _strip_query(req.url)
@@ -279,7 +286,10 @@ async def _safe_legacy_fallback(
         logger.info("curl_cffi fallback succeeded for %s", url[:60])
         return md_text, resolved_url
     except Exception as e:
-        logger.warning("curl_cffi fallback failed for %s: %s", url[:60], e)
+        safe_msg = str(e)
+        for known_proxy in SCRAPER_PROXY_LIST:
+            safe_msg = safe_msg.replace(known_proxy, _mask_proxy_url(known_proxy))
+        logger.warning("curl_cffi fallback failed for %s: %s", url[:60], safe_msg)
         return "", url
 
 

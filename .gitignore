@@ -44,3 +44,6 @@ htmlcov/
 
 # Email files (contain personal data)
 *.eml
+
+# Git worktrees
+.worktrees/

@@ -11,7 +11,6 @@ from core.config import (
     _LEVEL_MERGE_PRIORITY,
     _NOISE_LINE_RE,
     _NOISE_PHRASE_RE,
-    _PRELOADED_JSON_RE,
     _SECTION_SPLIT_RE,
     _TABLE_TAG_RE,
     LEVEL_ORDER,
@@ -291,11 +290,10 @@ class TestRegexPatterns:
     def test_section_split_re_matches_bold_title(self):
         assert _SECTION_SPLIT_RE.search("**BREAKING NEWS STORY**")
 
-    def test_preloaded_json_re(self):
+    def test_preloaded_json_extraction(self):
         html = 'window.__preloadedData = {"key": "val"};'
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match
-        assert '"key"' in match.group(1)
+        result = _extract_preloaded_json(html)
+        assert result == {"key": "val"}
 
 
 class TestParseSMTPPort:

@@ -13,10 +13,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.config import (
-    _PRELOADED_JSON_RE,
     HTTP_BLOCK_STATUS_CODES,
     MIN_HTML_RESPONSE_LENGTH,
     SCRAPER_URL_TIMEOUT,
+    _extract_preloaded_json,
     _is_blocked_content,
 )
 from core.scraper import (
@@ -552,38 +552,42 @@ class TestExpandedMarkdownTags:
 # ===========================================================================
 
 
-class TestExpandedPreloadedDataRegex:
-    """Tests for multi-pattern preloaded data extraction."""
+class TestExtractPreloadedJson:
+    """Tests for multi-pattern preloaded data extraction via _extract_preloaded_json."""
 
     def test_matches_preloaded_data(self):
         html = 'window.__preloadedData = {"key": "val"};'
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match
-        assert '"key"' in match.group(1)
+        result = _extract_preloaded_json(html)
+        assert result == {"key": "val"}
 
     def test_matches_next_data(self):
         html = (
             'window.__NEXT_DATA__ = {"props": {"pageProps": {"article": "content"}}};'
         )
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match
-        assert '"props"' in match.group(1)
+        result = _extract_preloaded_json(html)
+        assert result is not None
+        assert "props" in result
 
     def test_matches_preloaded_state(self):
         html = 'window.__PRELOADED_STATE__ = {"data": {"items": []}};'
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match
-        assert '"data"' in match.group(1)
+        result = _extract_preloaded_json(html)
+        assert result is not None
+        assert "data" in result
 
     def test_matches_with_spaces_around_equals(self):
         html = 'window.__NEXT_DATA__  =  {"page": "article"};'
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match
+        result = _extract_preloaded_json(html)
+        assert result is not None
 
     def test_no_match_on_unrelated_variable(self):
         html = 'window.someOtherVar = {"data": "value"};'
-        match = _PRELOADED_JSON_RE.search(html)
-        assert match is None
+        result = _extract_preloaded_json(html)
+        assert result is None
+
+    def test_ignores_braces_inside_string_values(self):
+        html = 'window.__NEXT_DATA__ = {"text": "use {braces} here", "ok": true};'
+        result = _extract_preloaded_json(html)
+        assert result == {"text": "use {braces} here", "ok": True}
 
     def test_parse_html_extracts_next_data(self):
         """Verify __NEXT_DATA__ is actually used by _parse_html_to_markdown."""
@@ -636,7 +640,6 @@ class TestAsyncSessionLifecycle:
         """_get_async_session should return an AsyncSession instance."""
         mock_session = MagicMock()
         monkeypatch.setattr("core.scraper._async_session", None)
-        monkeypatch.setattr("core.scraper._session_lock", None)
         monkeypatch.setattr("core.scraper.AsyncSession", lambda **kw: mock_session)
         result = await _get_async_session()
         assert result is mock_session

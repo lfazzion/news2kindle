@@ -80,8 +80,8 @@ def _get_genai_client() -> genai.Client | None:
 
 
 def _local_count_tokens(model: str, text: str) -> int:
-    """Estimativa conservadora: chars/4 + 15% de margem para conteúdo misto."""
-    return int(len(text) / 4 * 1.15)
+    """Estimativa conservadora: chars/3 + 15% de margem para conteúdo misto."""
+    return int(len(text) / 3 * 1.15)
 
 
 # ---------------------------------------------------------------------------

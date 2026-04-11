@@ -64,22 +64,14 @@ _BROWSER_HEADERS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 _async_session: AsyncSession | None = None
-_session_lock: asyncio.Lock | None = None
-
-
-def _get_session_lock() -> asyncio.Lock:
-    """Retorna o lock de sessão, criando-o lazily no event loop atual."""
-    global _session_lock
-    if _session_lock is None:
-        _session_lock = asyncio.Lock()
-    return _session_lock
+_session_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def _get_async_session() -> AsyncSession:
     """Lazy init thread-safe com double-checked locking (BUG-03)."""
     global _async_session
     if _async_session is None:
-        async with _get_session_lock():
+        async with _session_lock:
             if _async_session is None:
                 _async_session = AsyncSession(
                     impersonate="chrome",

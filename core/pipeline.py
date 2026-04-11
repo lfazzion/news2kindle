@@ -721,10 +721,10 @@ async def process_newsletters() -> None:
     if not kindle_sent:
         logger.error("Failed to send to Kindle.")
 
-    try:
-        if kindle_sent and emails_to_delete:
-            await cleanup_emails(emails_to_delete)
-    finally:
+    if kindle_sent and emails_to_delete:
+        await cleanup_emails(emails_to_delete)
+
+    if kindle_sent:
         for cache_path in (CACHE_FILE, CACHE_UIDS_FILE):
             if os.path.exists(cache_path):
                 try:

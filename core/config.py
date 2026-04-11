@@ -472,17 +472,26 @@ def _extract_preloaded_json(html: str) -> dict | None:
         if brace_start == -1:
             continue
         depth, i = 0, brace_start
+        in_string = False
+        escape_next = False
         while i < len(html):
             ch = html[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(html[brace_start : i + 1])
-                    except json.JSONDecodeError:
-                        break
+            if escape_next:
+                escape_next = False
+            elif ch == "\\" and in_string:
+                escape_next = True
+            elif ch == '"':
+                in_string = not in_string
+            elif not in_string:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(html[brace_start : i + 1])
+                        except json.JSONDecodeError:
+                            break
             i += 1
     return None
 
